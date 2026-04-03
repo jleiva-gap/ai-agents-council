@@ -1,0 +1,64 @@
+{
+  "default_provider": "codex",
+  "providers": {
+    "codex": {
+      "enabled": true,
+      "command": "codex",
+      "models": [
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex",
+        "gpt-5.2-codex",
+        "gpt-5.2",
+        "gpt-5.1-codex-max",
+        "gpt-5.1-codex-mini"
+      ],
+      "timeout_ms": 120000,
+      "session_mode": "fresh",
+      "prompt_transport": "file",
+      "launch_command": ["codex", "run", "--cwd", "{{WORKING_DIRECTORY}}", "--prompt-file", "{{PROMPT_FILE}}"]
+    },
+    "claude": {
+      "enabled": true,
+      "command": "claude",
+      "models": [
+        "sonnet",
+        "opus",
+        "claude-sonnet-4-5",
+        "claude-opus-4-1"
+      ],
+      "timeout_ms": 180000,
+      "session_mode": "fresh",
+      "prompt_transport": "stdin",
+      "launch_command": ["claude", "-p", "--permission-mode", "acceptEdits", "--add-dir", "{{WORKING_DIRECTORY}}"]
+    },
+    "gemini": {
+      "enabled": true,
+      "command": "gemini",
+      "models": [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash"
+      ],
+      "timeout_ms": 180000,
+      "session_mode": "fresh",
+      "prompt_transport": "arg",
+      "launch_command": ["gemini", "-p", "{{PROMPT_TEXT}}", "--approval-mode", "auto_edit", "--include-directories", "{{WORKING_DIRECTORY}}"]
+    },
+    "copilot": {
+      "enabled": true,
+      "command": "copilot",
+      "models": [
+        "gpt-5",
+        "gpt-5.2",
+        "gpt-5.1",
+        "claude-sonnet-4.5",
+        "gemini-2.5-pro"
+      ],
+      "timeout_ms": 180000,
+      "session_mode": "fresh",
+      "prompt_transport": "arg",
+      "launch_command": ["copilot", "-p", "{{PROMPT_TEXT}}", "-s", "--allow-all-tools", "--add-dir", "{{WORKING_DIRECTORY}}", "--no-ask-user"]
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "app_name": "AI Council",
+  "default_mode": "plan",
+  "workspace_dir": ".runs",
+  "default_council": "default-council",
+  "session": {
+    "timeline_file": "session/timeline.ndjson"
+  }
+}

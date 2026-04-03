@@ -1,0 +1,14 @@
+{
+  "name": "default-review-rubric",
+  "categories": [
+    { "id": "goal_alignment", "weight": 20 },
+    { "id": "acceptance_criteria", "weight": 20 },
+    { "id": "technical_correctness", "weight": 15 },
+    { "id": "design_quality", "weight": 10 },
+    { "id": "maintainability", "weight": 10 },
+    { "id": "testability", "weight": 10 },
+    { "id": "completeness", "weight": 10 },
+    { "id": "risk_handling", "weight": 5 }
+  ],
+  "blocking_threshold": 60
+}

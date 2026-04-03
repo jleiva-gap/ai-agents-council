@@ -1,0 +1,4 @@
+{
+  "name": "default-council",
+  "roles": ["planner", "challenger", "reviewer", "synthesizer"]
+}

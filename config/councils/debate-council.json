@@ -1,0 +1,4 @@
+{
+  "name": "debate-council",
+  "roles": ["advocate-a", "advocate-b", "critic", "consensus-builder"]
+}

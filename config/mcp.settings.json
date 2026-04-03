@@ -1,0 +1,8 @@
+{
+  "enabled": false,
+  "jira": {
+    "reader_command": ["npx", "-y", "mcp-remote@latest", "https://mcp.atlassian.com/v1/mcp"],
+    "timeout_ms": 30000,
+    "normalization_strategy": "markdown-ticket"
+  }
+}
