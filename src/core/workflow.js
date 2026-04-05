@@ -81,6 +81,48 @@ function buildTasks(acceptanceCriteria = []) {
   }));
 }
 
+function parseClarificationAnswersFromTicket(ticketText) {
+  const answers = [];
+  const lines = String(ticketText ?? "").split(/\r?\n/);
+  let inSection = false;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^##\s+Clarification Answers\s*$/i.test(line.trim())) {
+      inSection = true;
+      continue;
+    }
+
+    if (inSection && /^##\s+/.test(line.trim())) {
+      break;
+    }
+
+    if (!inSection) {
+      continue;
+    }
+
+    const promptMatch = line.match(/^\d+\.\s+(.+)$/);
+    if (!promptMatch) {
+      continue;
+    }
+
+    const answerLine = lines[index + 1] ?? "";
+    const answerMatch = answerLine.match(/^Answer:\s*(.+)$/i);
+    if (!answerMatch) {
+      continue;
+    }
+
+    answers.push({
+      id: `clarification-${answers.length + 1}`,
+      prompt: promptMatch[1].trim(),
+      answer: answerMatch[1].trim()
+    });
+    index += 1;
+  }
+
+  return answers;
+}
+
 function collectStageResponses(workPath) {
   const roundsRoot = path.join(workPath, "rounds");
   if (!pathExists(roundsRoot)) {
@@ -656,6 +698,11 @@ function availableActions(session) {
   return [];
 }
 
+function readOptionalInputText(inputDir, fileName) {
+  const filePath = path.join(inputDir, fileName);
+  return pathExists(filePath) ? readText(filePath).trim() : "";
+}
+
 function buildStatusPayload(frameworkRoot, repoPath, outputRoot, latest) {
   const finalFiles = pathExists(latest.resultPath) ? fs.readdirSync(latest.resultPath).sort() : [];
   return {
@@ -820,7 +867,50 @@ function exportRunToAwf(latest, repoPath, config) {
   };
 }
 
-export function decideLatest(frameworkRoot, repoPath, options = {}) {
+async function rerunLatestWithChanges(frameworkRoot, repoPath, latest, config, options = {}) {
+  const inputDir = path.join(latest.workPath, "input");
+  const ticketText = readText(path.join(inputDir, "ticket-definition.md"));
+  const prompt = String(options.prompt ?? options.reason ?? "").trim();
+  const priorContext = readOptionalInputText(inputDir, "extra-context.md");
+  const clarificationAnswers = parseClarificationAnswersFromTicket(ticketText);
+  const revisionContext = [
+    priorContext,
+    prompt
+      ? [
+        "## Revision Request",
+        prompt,
+        "",
+        `Revise the latest AI Council output to address this feedback while preserving the original request unless the feedback explicitly changes it.`
+      ].join("\n")
+      : ""
+  ].filter(Boolean).join("\n\n").trim();
+
+  return await runCouncil(frameworkRoot, repoPath, {
+    mode: latest.session.mode ?? "plan",
+    title: latest.session.title ?? null,
+    output_root: outputRootFromLatestSession(config, latest),
+    "ticket-file": path.join(inputDir, "ticket-definition.md"),
+    "extra-context": revisionContext || undefined,
+    clarification_answers: clarificationAnswers,
+    "constraints-file": pathExists(path.join(inputDir, "constraints.md")) ? path.join(inputDir, "constraints.md") : undefined,
+    "acceptance-file": pathExists(path.join(inputDir, "acceptance-criteria.md")) ? path.join(inputDir, "acceptance-criteria.md") : undefined,
+    "review-target-file": pathExists(path.join(inputDir, "review-target.md")) ? path.join(inputDir, "review-target.md") : undefined,
+    "debate-topic-file": pathExists(path.join(inputDir, "debate-topic.md")) ? path.join(inputDir, "debate-topic.md") : undefined,
+    provider: latest.session.effective_config?.provider_preference ?? config.user?.default_provider ?? config.providers.default_provider,
+    launch: latest.session.effective_config?.launch === true,
+    stage_assignments: latest.session.effective_config?.stage_assignments ?? config.user?.stage_assignments ?? {},
+    council_agents: latest.session.effective_config?.council_agents ?? config.user?.council_agents ?? [],
+    repo: latest.session.review_repo?.repo_path ?? repoPath
+  });
+}
+
+function outputRootFromLatestSession(config, latest) {
+  return latest.session.effective_config?.output_root
+    ?? config.user?.output_root
+    ?? ".ai-council/result";
+}
+
+export async function decideLatest(frameworkRoot, repoPath, options = {}) {
   const config = loadConfig(frameworkRoot, repoPath);
   const outputRoot = resolveOutputRoot(repoPath, config, options);
   const latest = latestSession(repoPath, outputRoot);
@@ -831,6 +921,24 @@ export function decideLatest(frameworkRoot, repoPath, options = {}) {
   const decision = String(options.decision ?? "").trim();
   if (!["approve", "request_changes", "reject"].includes(decision)) {
     throw new Error("Decision must be approve, request_changes, or reject.");
+  }
+
+  if (decision === "request_changes") {
+    const rerun = await rerunLatestWithChanges(frameworkRoot, repoPath, latest, config, options);
+    const refreshed = latestSession(repoPath, outputRootFromLatestSession(config, latest));
+    return {
+      ok: true,
+      status: rerun.status,
+      current_stage: rerun.status === "pending_approval" ? "awaiting_approval" : rerun.current_stage ?? null,
+      available_actions: refreshed ? availableActions(refreshed.session) : ["approve", "request_changes", "reject"],
+      review: {
+        decision,
+        prompt: String(options.prompt ?? options.reason ?? "").trim() || null,
+        notes: String(options.notes ?? "").trim() || null,
+        decided_at: nowIso()
+      },
+      rerun
+    };
   }
 
   latest.session.status = decision === "approve" ? "approved" : decision === "request_changes" ? "changes_requested" : "rejected";

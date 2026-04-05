@@ -1,16 +1,6 @@
 # Quickstart
 
-## Create a Planning Run
-
-```powershell
-ai-council run --repo C:\repo --mode plan --prompt "Plan a new council CLI"
-```
-
-## Review a Repository
-
-```powershell
-ai-council run --repo C:\repo --mode review --prompt "Review this implementation"
-```
+The preferred way to use AI Council is the guided shell. The direct commands below are still supported when you want scripting or a one-shot run.
 
 ## Guided Shell
 
@@ -24,6 +14,20 @@ On first run, the shell will:
 - wait for an Enter keypress
 - ask you to assign providers to `proposal`, `critique`, `refinement`, `synthesis`, and `validation`
 - save those assignments for future runs
+
+If the latest run is still waiting for a decision, re-entering the shell will reopen that pending approval flow so you can approve, reject, or request changes.
+
+## Create a Planning Run
+
+```powershell
+ai-council run --repo C:\repo --mode plan --prompt "Plan a new council CLI"
+```
+
+## Review a Repository
+
+```powershell
+ai-council run --repo C:\repo --mode review --prompt "Review this implementation"
+```
 
 ## Outputs
 
@@ -46,6 +50,8 @@ If a provider launch fails, check:
 
 By default these runs are written under `.ai-council/result`. You can change that in the shell configuration flow or pass `--output-root <path>` on the command line.
 Repo-specific settings, stage assignments, and provider startup preflight commands are stored under `.ai-council/settings.json`.
+
+When you choose `Request changes`, AI Council creates a follow-up run using the latest ticket plus the change request context, rewrites the newest `result/` artifacts, and returns to pending approval.
 
 ## Shell Tips
 

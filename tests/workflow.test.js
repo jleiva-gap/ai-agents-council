@@ -120,6 +120,8 @@ test("ambiguous input pauses for clarification before proposal starts", async ()
   assert.equal(result.question_count > 0, true);
   assert.equal(fs.existsSync(path.join(result.work_path, "input", "clarification.json")), true);
   assert.equal(fs.existsSync(path.join(result.work_path, "rounds", "01-proposal")), false);
+  const clarification = JSON.parse(fs.readFileSync(path.join(result.work_path, "input", "clarification.json"), "utf8"));
+  assert.equal(clarification.questions.some((question) => /acceptance criteria/i.test(question.prompt)), false);
 });
 
 test("clarification answers allow proposal to continue", async () => {
@@ -155,6 +157,23 @@ test("clarification answers allow proposal to continue", async () => {
 
   assert.equal(result.status, "pending_approval");
   assert.equal(fs.existsSync(path.join(result.work_path, "rounds", "01-proposal")), true);
+});
+
+test("implicit acceptance criteria do not force a generic scope question", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-implicit-ac-"));
+  copyDir(path.resolve("."), root);
+
+  const result = await runCouncil(root, root, {
+    mode: "plan",
+    prompt: "Add an audit trail so every successful student update records an audit entry and the public API stays unchanged."
+  });
+
+  assert.equal(result.status, "awaiting_clarification");
+  const clarification = JSON.parse(fs.readFileSync(path.join(result.work_path, "input", "clarification.json"), "utf8"));
+  assert.equal(clarification.questions.some((question) => question.id === "clarify-scope"), false);
+  assert.equal(clarification.questions.some((question) => /acceptance criteria/i.test(question.prompt)), false);
+  assert.equal(clarification.questions.some((question) => /scope/i.test(question.prompt)), false);
+  assert.equal(clarification.questions.some((question) => /boundary or non-goal/i.test(question.prompt)), true);
 });
 
 test("round response artifacts are registered even when providers are not auto-launched", async () => {
@@ -301,7 +320,7 @@ test("resume exposes pending approval actions and approval can export AWF artifa
   assert.equal(resumed.status, "pending_approval");
   assert.deepEqual(resumed.available_actions, ["approve", "request_changes", "reject"]);
 
-  const approved = decideLatest(root, root, {
+  const approved = await decideLatest(root, root, {
     decision: "approve",
     create_awf: true
   });
@@ -311,6 +330,37 @@ test("resume exposes pending approval actions and approval can export AWF artifa
   assert.equal(fs.existsSync(path.join(root, ".wi", "tasks.json")), true);
   const state = JSON.parse(fs.readFileSync(path.join(root, ".wi", "state.json"), "utf8"));
   assert.equal(state.current_phase, "implementation_ready");
+});
+
+test("request changes reruns the latest process and leaves the new result pending approval", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-request-changes-"));
+  copyDir(path.resolve("."), root);
+
+  const initial = await runCouncil(root, root, {
+    mode: "plan",
+    title: "Refine approval loop",
+    prompt: "Create a plan.\n- Update the approval loop\n- Add tests",
+    clarification_answers: clarificationAnswers()
+  });
+
+  const requested = await decideLatest(root, root, {
+    decision: "request_changes",
+    prompt: "Add a follow-up task that explicitly covers resuming pending approvals."
+  });
+
+  assert.equal(requested.status, "pending_approval");
+  assert.equal(requested.current_stage, "awaiting_approval");
+  assert.deepEqual(requested.available_actions, ["approve", "request_changes", "reject"]);
+  assert.notEqual(requested.rerun.run_id, initial.run_id);
+
+  const resumed = resumeLatest(root, root);
+  assert.equal(resumed.status, "pending_approval");
+  assert.equal(resumed.current_stage, "awaiting_approval");
+  assert.deepEqual(resumed.available_actions, ["approve", "request_changes", "reject"]);
+
+  const latestTicket = fs.readFileSync(path.join(requested.rerun.work_path, "input", "extra-context.md"), "utf8");
+  assert.match(latestTicket, /Revision Request/);
+  assert.match(latestTicket, /resuming pending approvals/i);
 });
 
 test("custom output root is respected", async () => {

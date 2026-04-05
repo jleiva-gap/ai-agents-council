@@ -59,7 +59,7 @@ export async function main(argv) {
         printJson(resumeLatest(frameworkRoot, repoPath));
         return;
       case "decide":
-        printJson(decideLatest(frameworkRoot, repoPath, {
+        printJson(await decideLatest(frameworkRoot, repoPath, {
           decision: getOption(options, "decision"),
           prompt: getOption(options, "prompt"),
           reason: getOption(options, "reason"),

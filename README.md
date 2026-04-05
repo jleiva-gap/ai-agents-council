@@ -27,11 +27,11 @@ AI Council implements a deliberative, multi-agent workflow built around a Cycle 
 
 ## Commands
 
+- `ai-council shell`
 - `ai-council tooling-status`
 - `ai-council status`
 - `ai-council run --mode plan --prompt "..."`
 - `ai-council run --mode review --ticket-file ticket.md --repo C:\repo`
-- `ai-council shell`
 - `ai-council resume`
 
 ## Behavior
@@ -50,11 +50,20 @@ The CLI is now repo-targeted. Once installed, you can run it from any folder and
 
 ## Install And Start
 
+The preferred day-to-day entry point is the guided shell. The direct commands remain available for scripting, automation, and one-off runs.
+
 ```powershell
 .\bootstrap.ps1
 node src/cli/main.js install-framework
 node src/cli/main.js tooling-status
 ai-council shell --repo C:\some-repo
+```
+
+Direct command examples still work when you want a non-interactive flow:
+
+```powershell
+ai-council run --repo C:\some-repo --mode plan --prompt "Plan a new council CLI"
+ai-council resume --repo C:\some-repo
 ```
 
 The guided shell now starts with a banner and overview, waits for an Enter keypress, and on first run asks you to configure council agents and stage participants for proposal, critique, refinement, synthesis, and validation so multiple agents can deliberate on the same ticket before the final result is produced.

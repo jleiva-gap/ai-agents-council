@@ -51,3 +51,5 @@ ai-council help
 ai-council tooling-status --repo C:\repo
 ai-council shell --repo C:\repo
 ```
+
+For normal interactive use, prefer `ai-council shell --repo C:\repo`. The other commands remain available for scripting and direct automation.

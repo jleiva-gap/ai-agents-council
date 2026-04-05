@@ -10,6 +10,12 @@ function parseAcceptanceCriteria(content) {
     .map((line) => line.replace(/^[-*]\s+|^\d+\.\s+/, ""));
 }
 
+function normalizeAcceptanceCriteria(items = []) {
+  return items
+    .map((item) => String(item ?? "").trim())
+    .filter((item) => item && !/^(acceptance criteria were not explicitly listed in the input|none recorded yet|tbd|not provided)$/i.test(item));
+}
+
 function sectionsFromPrompt(prompt, title) {
   const acceptance = parseAcceptanceCriteria(prompt);
   return `# Ticket Definition
@@ -34,7 +40,7 @@ Clarify the best path to deliver the request.
 - Produce mode-specific council outputs
 
 ## Acceptance Criteria
-${acceptance.length > 0 ? acceptance.map((item) => `- ${item}`).join("\n") : "- Acceptance criteria were not explicitly listed in the input."}
+${acceptance.length > 0 ? acceptance.map((item) => `- ${item}`).join("\n") : ""}
 
 ## Open Questions
 - None recorded yet
@@ -140,10 +146,29 @@ function looksPlaceholder(text) {
   return /no prompt supplied|normalized from a jira url|none recorded yet|clarify the best path/i.test(String(text ?? "").trim());
 }
 
+function summarizeTicketIntent(sections, acceptance) {
+  const summary = String(sections.summary ?? sections.business_goal ?? sections.technical_objective ?? "").trim();
+  if (summary && !looksPlaceholder(summary)) {
+    return summary;
+  }
+
+  return acceptance[0] ?? "";
+}
+
+function hasExplicitBoundarySignal(text) {
+  return /\b(only|without|must not|do not|don't|keep existing|preserve|exclude|out of scope|no api change)\b/i.test(String(text ?? ""));
+}
+
+function likelyBroadOrAmbiguousBoundary(text) {
+  return /\b(and more|etc|as needed|if needed|end-to-end|overall|entire|whole system|improve|enhance|update the system|handle this)\b/i.test(String(text ?? ""));
+}
+
 export function buildClarificationQuestions(canonicalContent, mode = "plan") {
   const sections = parseSections(canonicalContent);
-  const acceptance = parseAcceptanceCriteria(canonicalContent);
+  const acceptance = normalizeAcceptanceCriteria(parseAcceptanceCriteria(canonicalContent));
   const questions = [];
+  const intent = summarizeTicketIntent(sections, acceptance);
+  const boundaryContext = [intent, ...acceptance, sections.constraints, sections.scope].filter(Boolean).join(" ");
 
   if (!sections.summary || looksPlaceholder(sections.summary)) {
     questions.push({
@@ -155,21 +180,22 @@ export function buildClarificationQuestions(canonicalContent, mode = "plan") {
   if (acceptance.length === 0 && mode !== "debate") {
     questions.push({
       id: "clarify-acceptance",
-      prompt: "What acceptance criteria or success signals should the council treat as the delivery target?"
+      prompt: `Reading the request, what concrete outcomes or checks should tell the council that "${intent || "this work"}" is done?`
     });
   }
 
-  if (!sections.scope && ["plan", "design", "spike"].includes(mode)) {
+  if (!sections.scope && ["plan", "design", "spike"].includes(mode)
+    && (acceptance.length === 0 || likelyBroadOrAmbiguousBoundary(boundaryContext))) {
     questions.push({
       id: "clarify-scope",
-      prompt: "What is in scope for this request, and what should the council avoid expanding into?"
+      prompt: `Should "${intent || "this request"}" stay tightly focused on the described outcome, or does the story also expect nearby follow-on work to be included?`
     });
   }
 
-  if (!sections.constraints && ["plan", "design", "review"].includes(mode)) {
+  if (!sections.constraints && ["plan", "design", "review"].includes(mode) && !hasExplicitBoundarySignal(boundaryContext)) {
     questions.push({
       id: "clarify-constraints",
-      prompt: "What constraints, non-goals, or implementation boundaries must the council preserve?"
+      prompt: `What important boundary or non-goal should the council preserve while working on "${intent || "this request"}"?`
     });
   }
 
@@ -185,9 +211,9 @@ export function previewNormalizedInput(options = {}, mode = "plan") {
         options.title ??
         canonicalContent.match(/## Title\s+([\s\S]*?)\n## /)?.[1]?.trim() ??
         "Untitled request",
-      acceptance_criteria_count: parseAcceptanceCriteria(canonicalContent).length
+      acceptance_criteria_count: normalizeAcceptanceCriteria(parseAcceptanceCriteria(canonicalContent)).length
     },
-    acceptance_criteria: parseAcceptanceCriteria(canonicalContent),
+    acceptance_criteria: normalizeAcceptanceCriteria(parseAcceptanceCriteria(canonicalContent)),
     canonical_content: canonicalContent,
     clarification_questions: buildClarificationQuestions(canonicalContent, mode)
   };
@@ -249,7 +275,7 @@ export function normalizeInput(runPath, options = {}) {
     writeText(path.join(inputDir, "extra-context.md"), String(options["extra-context"]));
   }
 
-  const acceptance = parseAcceptanceCriteria(canonicalContent);
+  const acceptance = normalizeAcceptanceCriteria(parseAcceptanceCriteria(canonicalContent));
   const metadata = {
     source_type: sourceType,
     title:
