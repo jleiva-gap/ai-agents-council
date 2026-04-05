@@ -6,6 +6,17 @@ import path from "node:path";
 
 import { loadRepoSettings, saveRepoSettings } from "../src/core/config.js";
 
+test("repo settings default to auto-launch enabled", () => {
+  const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-defaults-"));
+
+  try {
+    const settings = loadRepoSettings(repoPath);
+    assert.equal(settings.auto_launch, true);
+  } finally {
+    fs.rmSync(repoPath, { recursive: true, force: true });
+  }
+});
+
 test("repo settings support council agent profiles and legacy provider stage assignments", () => {
   const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-config-"));
 

@@ -3,7 +3,8 @@ import readline from "node:readline/promises";
 
 import { hasCompletedFirstRun, loadRepoSettings, saveRepoSettings } from "../core/config.js";
 import { getCouncilVisualReference, getDeliberationCycle } from "../core/identity.js";
-import { getStatus, runCouncil, toolingStatus } from "../core/workflow.js";
+import { decideLatest, exportLatestToAwf, getStatus, runCouncil, toolingStatus } from "../core/workflow.js";
+import { previewNormalizedInput } from "../input/normalize.js";
 
 const ANSI = {
   reset: "\u001b[0m",
@@ -193,17 +194,39 @@ function renderHome(status, settings, repoPath) {
       `Title: ${status.title ?? "(untitled)"}`,
       `Latest run: ${status.latest_run}`,
       `Output root: ${status.output_root}`,
-      `${icon("next")} Recommended: ${accent("Inspect the latest result artifacts or launch a new run")}`,
+      `Status: ${status.status ?? "prepared"}`,
+      `${icon("next")} Recommended: ${accent(status.current_stage === "awaiting_approval" ? "Review and decide on the latest result" : "Inspect the latest result artifacts or launch a new run")}`,
       `Why: ${status.recommended_action}`
     ]);
-    panel(`${icon("next")} Next Steps`, [
-      "1. Start a new run",
-      "2. Show latest artifacts",
-      "3. Configure this repo",
-      "4. Show cycle",
-      "5. Help",
-      "6. Exit"
-    ]);
+    if (status.current_stage === "awaiting_approval") {
+      panel(`${icon("next")} Next Steps`, [
+        "1. Review latest result",
+        "2. Approve result",
+        "3. Request changes",
+        "4. Reject result",
+        "5. Show latest artifacts",
+        "6. Start a new run",
+        "7. Configure this repo",
+        "8. Exit"
+      ]);
+    } else if (status.status === "approved") {
+      panel(`${icon("next")} Next Steps`, [
+        "1. Export approved result to AWF",
+        "2. Show latest artifacts",
+        "3. Start a new run",
+        "4. Configure this repo",
+        "5. Exit"
+      ]);
+    } else {
+      panel(`${icon("next")} Next Steps`, [
+        "1. Start a new run",
+        "2. Show latest artifacts",
+        "3. Configure this repo",
+        "4. Show cycle",
+        "5. Help",
+        "6. Exit"
+      ]);
+    }
   }
 
   console.log("");
@@ -261,10 +284,17 @@ async function promptForChoice(rl, prompt, choices, defaultValue) {
   const normalizedChoices = choices.map((choice) => String(choice).trim()).filter(Boolean);
   const defaultChoice = normalizedChoices.includes(defaultValue) ? defaultValue : normalizedChoices[0];
 
+  panel(`${icon("tools")} ${prompt}`, normalizedChoices.map((choice, index) => `${index + 1}. ${choice}`));
+
   while (true) {
-    const input = (await rl.question(`${prompt} [${normalizedChoices.join("|")}] (${defaultChoice})> `)).trim();
+    const input = (await rl.question(`${prompt} number [${normalizedChoices.indexOf(defaultChoice) + 1}]> `)).trim();
     if (!input) {
       return defaultChoice;
+    }
+
+    const numeric = parseNumberSelection(input, 1, normalizedChoices.length);
+    if (numeric !== null) {
+      return normalizedChoices[numeric - 1];
     }
 
     const selected = normalizedChoices.find((choice) => choice.toLowerCase() === input.toLowerCase());
@@ -272,7 +302,7 @@ async function promptForChoice(rl, prompt, choices, defaultValue) {
       return selected;
     }
 
-    console.log(warn(`Select one of: ${normalizedChoices.join(", ")}.`));
+    console.log(warn(`Select a number between 1 and ${normalizedChoices.length}.`));
   }
 }
 
@@ -395,8 +425,8 @@ async function configureWorkspace(repoPath, rl, tools, existingSettings = {}) {
   const refinement = await chooseCouncilAgents(rl, councilAgents, "Refinement", 1, [0]);
   const synthesis = await chooseCouncilAgents(rl, councilAgents, "Synthesis", 1, [0]);
   const validation = await chooseCouncilAgents(rl, councilAgents, "Validation", 2, [0, 1]);
-  const autoLaunchInput = (await rl.question("Auto-launch provider commands when available? [y/N] ")).trim().toLowerCase();
-  const autoLaunch = autoLaunchInput === "y" || autoLaunchInput === "yes";
+  const autoLaunchInput = (await rl.question("Auto-launch provider commands when available? [Y/n] ")).trim().toLowerCase();
+  const autoLaunch = autoLaunchInput === "" || autoLaunchInput === "y" || autoLaunchInput === "yes";
   const selectedProviders = [...new Set(councilAgents.map((agent) => agent.provider))];
   const providerOverrides = { ...(existingSettings.provider_overrides ?? {}) };
 
@@ -461,10 +491,6 @@ async function promptRun(rl, frameworkRoot, repoPath, settings) {
   ]);
 
   const mode = await promptForChoice(rl, "Mode", ["plan", "design", "spike", "debate", "review"], "plan");
-  const source = await promptForChoice(rl, "Input source", ["prompt", "markdown", "jira", "resume"], "prompt");
-  if (source === "resume") {
-    return { result: getStatus(frameworkRoot, repoPath), settings };
-  }
 
   const title = (await rl.question("Title (optional)> ")).trim();
   const options = {
@@ -478,23 +504,29 @@ async function promptRun(rl, frameworkRoot, repoPath, settings) {
     council_agents: settings.council_agents
   };
 
-  if (source === "markdown") {
-    options["ticket-file"] = (await rl.question("Markdown file path> ")).trim();
-  } else if (source === "jira") {
-    options["jira-url"] = (await rl.question("Jira URL> ")).trim();
+  const sourceInput = (await rl.question("Prompt, Markdown path, or Jira URL> ")).trim();
+  if (/^https?:\/\//i.test(sourceInput)) {
+    options["ticket-source"] = sourceInput;
+  } else if (/\.md$/i.test(sourceInput)) {
+    options["ticket-source"] = sourceInput;
   } else {
-    options.prompt = (await rl.question("Prompt> ")).trim();
+    options.prompt = sourceInput;
   }
 
   if (mode === "review") {
     options.repo = (await rl.question("Repo path to review> ")).trim() || repoPath;
   }
 
+  const clarificationAnswers = await promptClarificationAnswers(rl, options, mode);
+  if (clarificationAnswers.length > 0) {
+    options.clarification_answers = clarificationAnswers;
+  }
+
   const summary = {
     mode,
     repo_path: repoPath,
     output_root: path.resolve(repoPath, settings.output_root ?? ".ai-council/result"),
-    source,
+    source: /^https?:\/\//i.test(sourceInput) ? "jira" : /\.md$/i.test(sourceInput) ? "markdown" : "prompt",
     title: title || "",
     stage_summary: Object.entries(settings.stage_assignments ?? {})
       .map(([stage, participants]) => `${stage}:${(participants ?? []).map((id) => settings.council_agents?.find((agent) => agent.id === id)?.label ?? id).join("/") || "-"}`)
@@ -582,6 +614,64 @@ function renderRunResult(result) {
     `Stages: ${result.deliberation_cycle.map((stage) => `${stage.stage}:${(stage.participant_labels ?? stage.participants).join("/")}`).join(" | ")}`,
     `Next action: ${result.next_action}`
   ]);
+}
+
+async function promptLatestApproval(rl, frameworkRoot, repoPath) {
+  const status = getStatus(frameworkRoot, repoPath);
+  panel(`${icon("next")} Review Latest Result`, [
+    `Title: ${status.title ?? "(untitled)"}`,
+    `Status: ${status.status ?? "prepared"}`,
+    `Latest run: ${status.latest_run ?? "(none)"}`,
+    `Artifacts: ${status.final_files?.length > 0 ? status.final_files.join(", ") : "(none)"}`,
+    "",
+    "1. Approve",
+    "2. Request changes",
+    "3. Reject",
+    "4. Decide later"
+  ]);
+
+  const decision = await promptForNumberInRange(rl, "Decision", 1, 4, 4);
+  if (decision === 4) {
+    return { status: "pending_approval" };
+  }
+
+  if (decision === 1) {
+    const exportChoice = await promptForChoice(rl, "Export approved result to AWF now?", ["yes", "no"], "no");
+    return decideLatest(frameworkRoot, repoPath, {
+      decision: "approve",
+      create_awf: exportChoice === "yes"
+    });
+  }
+
+  const prompt = (await rl.question(decision === 2 ? "Change request prompt> " : "Rejection reason> ")).trim();
+  return decideLatest(frameworkRoot, repoPath, {
+    decision: decision === 2 ? "request_changes" : "reject",
+    prompt
+  });
+}
+
+async function promptClarificationAnswers(rl, options, mode) {
+  const preview = previewNormalizedInput(options, mode);
+  if (!Array.isArray(preview.clarification_questions) || preview.clarification_questions.length === 0) {
+    return [];
+  }
+
+  panel(`${icon("warn")} Clarification Needed`, [
+    "AI Council needs a little more context before the proposal phase starts.",
+    ...preview.clarification_questions.map((question, index) => `${index + 1}. ${question.prompt}`)
+  ]);
+
+  const answers = [];
+  for (const question of preview.clarification_questions) {
+    const answer = (await rl.question(`${question.prompt}> `)).trim();
+    answers.push({
+      id: question.id,
+      prompt: question.prompt,
+      answer
+    });
+  }
+
+  return answers;
 }
 
 function renderRunSummary(summary) {
@@ -739,6 +829,9 @@ export async function startShell(frameworkRoot, repoPath) {
           }
           clearScreen();
           renderRunResult(action.result);
+          if (action.result?.status === "pending_approval") {
+            await promptLatestApproval(rl, frameworkRoot, repoPath);
+          }
           await waitForContinue(rl);
         }
         continue;
@@ -756,6 +849,9 @@ export async function startShell(frameworkRoot, repoPath) {
           }
           clearScreen();
           renderRunResult(action.result);
+          if (action.result?.status === "pending_approval") {
+            await promptLatestApproval(rl, frameworkRoot, repoPath);
+          }
           await waitForContinue(rl);
           continue;
         }
@@ -781,6 +877,92 @@ export async function startShell(frameworkRoot, repoPath) {
         continue;
       }
 
+      if (status.current_stage === "awaiting_approval") {
+        if (response === "1" || response === "2" || response === "3" || response === "4") {
+          if (response === "1") {
+            await promptLatestApproval(rl, frameworkRoot, repoPath);
+          } else if (response === "2") {
+            await decideLatest(frameworkRoot, repoPath, { decision: "approve" });
+          } else if (response === "3") {
+            const prompt = (await rl.question("Change request prompt> ")).trim();
+            await decideLatest(frameworkRoot, repoPath, { decision: "request_changes", prompt });
+          } else if (response === "4") {
+            const prompt = (await rl.question("Rejection reason> ")).trim();
+            await decideLatest(frameworkRoot, repoPath, { decision: "reject", prompt });
+          }
+          continue;
+        }
+        if (response === "5") {
+          clearScreen();
+          renderArtifacts(status);
+          await waitForContinue(rl);
+          continue;
+        }
+        if (response === "6") {
+          const action = await promptRun(rl, frameworkRoot, repoPath, settings);
+          if (action.cancelled) {
+            continue;
+          }
+          if (action.reconfigure) {
+            settings = await configureWorkspace(repoPath, rl, tools, settings);
+            continue;
+          }
+          clearScreen();
+          renderRunResult(action.result);
+          if (action.result?.status === "pending_approval") {
+            await promptLatestApproval(rl, frameworkRoot, repoPath);
+          }
+          await waitForContinue(rl);
+          continue;
+        }
+        if (response === "7") {
+          settings = await configureWorkspace(repoPath, rl, tools, settings);
+          continue;
+        }
+        if (response === "8" || response.toLowerCase() === "exit") {
+          return { status: "exited" };
+        }
+        continue;
+      }
+
+      if (status.status === "approved") {
+        if (response === "1") {
+          exportLatestToAwf(frameworkRoot, repoPath);
+          continue;
+        }
+        if (response === "2") {
+          clearScreen();
+          renderArtifacts(status);
+          await waitForContinue(rl);
+          continue;
+        }
+        if (response === "3") {
+          const action = await promptRun(rl, frameworkRoot, repoPath, settings);
+          if (action.cancelled) {
+            continue;
+          }
+          if (action.reconfigure) {
+            settings = await configureWorkspace(repoPath, rl, tools, settings);
+            continue;
+          }
+          clearScreen();
+          renderRunResult(action.result);
+          if (action.result?.status === "pending_approval") {
+            await promptLatestApproval(rl, frameworkRoot, repoPath);
+          }
+          await waitForContinue(rl);
+          continue;
+        }
+        if (response === "4") {
+          settings = await configureWorkspace(repoPath, rl, tools, settings);
+          continue;
+        }
+        if (response === "5" || response.toLowerCase() === "exit") {
+          return { status: "exited" };
+        }
+        continue;
+      }
+
       if (response === "1") {
         const action = await promptRun(rl, frameworkRoot, repoPath, settings);
         if (action.cancelled) {
@@ -792,6 +974,9 @@ export async function startShell(frameworkRoot, repoPath) {
         }
         clearScreen();
         renderRunResult(action.result);
+        if (action.result?.status === "pending_approval") {
+          await promptLatestApproval(rl, frameworkRoot, repoPath);
+        }
         await waitForContinue(rl);
         continue;
       }

@@ -110,7 +110,7 @@ export function loadRepoSettings(repoPath) {
     first_run_complete: false,
     default_provider: null,
     default_participant: null,
-    auto_launch: false,
+    auto_launch: true,
     output_root: ".ai-council/result",
     council_agents: [],
     council_assignments: {

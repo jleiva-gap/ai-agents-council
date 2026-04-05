@@ -3,7 +3,8 @@ import { fileURLToPath } from "node:url";
 
 import { startShell } from "./interactive.js";
 import { installFramework, uninstallFramework, upgradeFramework } from "../orchestrator/install_service.js";
-import { getStatus, resumeLatest, runCouncil, toolingStatus } from "../core/workflow.js";
+import { decideLatest, exportLatestToAwf, getStatus, resumeLatest, runCouncil, toolingStatus } from "../core/workflow.js";
+import { loadRepoSettings } from "../core/config.js";
 import { getBooleanOption, getOption, parseCliArgs, printHelp } from "../utils/cli.js";
 
 const currentFile = fileURLToPath(import.meta.url);
@@ -17,6 +18,10 @@ export async function main(argv) {
   const { command, options } = parseCliArgs(argv);
   const frameworkRoot = path.resolve(getOption(options, "root") ?? defaultFrameworkRoot);
   const repoPath = path.resolve(getOption(options, "repo") ?? getOption(options, "path") ?? process.cwd());
+  const repoSettings = loadRepoSettings(repoPath);
+  const resolvedLaunch = Object.hasOwn(options, "launch")
+    ? getBooleanOption(options, "launch")
+    : repoSettings.auto_launch !== false;
 
   try {
     if (options.help || command === "help") {
@@ -53,6 +58,20 @@ export async function main(argv) {
       case "resume":
         printJson(resumeLatest(frameworkRoot, repoPath));
         return;
+      case "decide":
+        printJson(decideLatest(frameworkRoot, repoPath, {
+          decision: getOption(options, "decision"),
+          prompt: getOption(options, "prompt"),
+          reason: getOption(options, "reason"),
+          notes: getOption(options, "notes"),
+          create_awf: getBooleanOption(options, "create-awf")
+        }));
+        return;
+      case "export-awf":
+        printJson(exportLatestToAwf(frameworkRoot, repoPath, {
+          output_root: getOption(options, "output-root")
+        }));
+        return;
       case "shell":
         printJson(await startShell(frameworkRoot, repoPath));
         return;
@@ -68,7 +87,7 @@ export async function main(argv) {
           "jira-url": getOption(options, "jira-url"),
           repo: getOption(options, "repo"),
           provider: getOption(options, "provider"),
-          launch: getBooleanOption(options, "launch"),
+          launch: resolvedLaunch,
           "extra-context": getOption(options, "extra-context"),
           "extra-context-file": getOption(options, "extra-context-file"),
           "constraints-file": getOption(options, "constraints-file"),

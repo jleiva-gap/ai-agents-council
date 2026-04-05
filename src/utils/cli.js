@@ -55,6 +55,8 @@ Commands:
   status                Show the latest council run summary
   run                   Create a new council run and generate artifacts
   resume                Show the latest run and recommended next actions
+  decide                Approve, request changes, or reject the latest run
+  export-awf           Convert the latest approved result into .wi AWF artifacts
   shell                 Launch the guided council shell
   help                  Show this help text
 
@@ -71,5 +73,7 @@ Common options:
   --title <text>        Optional title override
   --provider <name>     Preferred default provider
   --launch              Preview or launch provider commands when configured
+  --decision <name>     approve | request_changes | reject
+  --create-awf          Export .wi AWF artifacts immediately after approval
 `);
 }

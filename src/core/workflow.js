@@ -4,10 +4,10 @@ import path from "node:path";
 import { loadConfig } from "./config.js";
 import { createRunWorkspace, writeCouncilLog, writeSessionManifest, writeTimeline } from "./session.js";
 import { formatCouncilLog, getCouncilVisualReference, getDeliberationCycle, getStageIdentity } from "./identity.js";
-import { normalizeInput } from "../input/normalize.js";
+import { buildClarificationQuestions, normalizeInput } from "../input/normalize.js";
 import { detectProviders, maybeLaunchPrompt, maybeRunProviderStartup, resolveProvidersByNames, writeCouncilPlan } from "../providers/index.js";
 import { buildReviewEvidence } from "../review/evidence.js";
-import { ensureDir, pathExists, readJson, slugify, writeJson, writeText } from "../utils/fs.js";
+import { ensureDir, pathExists, readJson, readText, removeDir, slugify, writeJson, writeText } from "../utils/fs.js";
 
 const MODE_SUMMARIES = {
   plan: "Generate an implementation roadmap.",
@@ -35,64 +35,325 @@ function latestRunPath(rootPath, outputRoot) {
   return entries.length > 0 ? path.join(runsRoot, entries.at(-1)) : null;
 }
 
-function writePlanArtifacts(finalDir, title, acceptanceCriteria) {
-  const tasks = acceptanceCriteria.length > 0
-    ? acceptanceCriteria.map((criterion, index) => ({ id: `T${index + 1}`, title: criterion, status: "pending" }))
-    : [{ id: "T1", title: "Clarify and decompose implementation work", status: "pending" }];
-
-  writeText(path.join(finalDir, "final-plan.md"), `# Final Plan\n\n## Title\n${title}\n\nA draft council plan has been prepared. Refine it using the round outputs.\n`);
-  writeJson(path.join(finalDir, "tasks.json"), { tasks });
-  writeText(path.join(finalDir, "dependencies.md"), "# Dependencies\n\n- Confirm implementation dependencies from the ticket and surrounding system context.\n");
-  writeText(path.join(finalDir, "risks.md"), "# Risks\n\n- Hidden technical assumptions\n- Missing acceptance coverage\n- Integration friction across affected systems\n");
-  writeText(path.join(finalDir, "open-questions.md"), "# Open Questions\n\n- Which assumptions still need validation before implementation starts?\n");
-  writeText(path.join(finalDir, "summary.md"), `# Summary\n\nA draft implementation plan package was created for **${title}**.\n`);
+function nowIso() {
+  return new Date().toISOString();
 }
 
-function writeDesignArtifacts(finalDir, title) {
-  writeText(path.join(finalDir, "design.md"), `# Design\n\n## Goal\n${title}\n\n## Recommended Direction\nUse the council rounds to converge on the design with explicit tradeoffs and interfaces.\n`);
-  writeText(path.join(finalDir, "decision-log.md"), "# Decision Log\n\n- No final decisions recorded yet.\n");
-  writeText(path.join(finalDir, "alternatives.md"), "# Alternatives\n\n- Alternative A\n- Alternative B\n");
-  writeText(path.join(finalDir, "risks.md"), "# Risks\n\n- Architecture drift\n- Interface ambiguity\n");
-  writeText(path.join(finalDir, "assumptions.md"), "# Assumptions\n\n- System constraints will be clarified during council critique.\n");
-  writeText(path.join(finalDir, "open-questions.md"), "# Open Questions\n\n- Which interfaces or ownership boundaries remain uncertain?\n");
-  writeText(path.join(finalDir, "summary.md"), `# Summary\n\nA draft design package was created for **${title}**.\n`);
+function parseTicketSections(content) {
+  const sections = {};
+  let current = null;
+  for (const line of String(content ?? "").split(/\r?\n/)) {
+    const heading = line.match(/^##\s+(.+)$/);
+    if (heading) {
+      current = heading[1].trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
+      sections[current] = [];
+      continue;
+    }
+
+    if (current) {
+      sections[current].push(line);
+    }
+  }
+
+  return Object.fromEntries(Object.entries(sections).map(([key, lines]) => [key, lines.join("\n").trim()]));
 }
 
-function writeSpikeArtifacts(finalDir, title) {
-  writeText(path.join(finalDir, "spike-plan.md"), `# Spike Plan\n\n## Topic\n${title}\n\n## Goal\nReduce uncertainty before committing to a final design or implementation approach.\n`);
-  writeText(path.join(finalDir, "unknowns.md"), "# Unknowns\n\n- Key technical unknowns go here.\n");
-  writeText(path.join(finalDir, "hypotheses.md"), "# Hypotheses\n\n- Hypothesis 1\n");
-  writeText(path.join(finalDir, "experiment-matrix.md"), "# Experiment Matrix\n\n| Question | Experiment | Evidence |\n| --- | --- | --- |\n| TBD | TBD | TBD |\n");
-  writeText(path.join(finalDir, "recommendation.md"), "# Recommendation\n\n- Run the highest-value experiment first.\n");
-  writeText(path.join(finalDir, "summary.md"), `# Summary\n\nA spike framing package was created for **${title}**.\n`);
+function extractList(sectionText) {
+  return String(sectionText ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^[-*]\s+/.test(line) || /^\d+\.\s+/.test(line))
+    .map((line) => line.replace(/^[-*]\s+|^\d+\.\s+/, "").trim())
+    .filter((line) => line && !/^none recorded yet$/i.test(line));
 }
 
-function writeDebateArtifacts(finalDir, title) {
-  writeText(path.join(finalDir, "debate-summary.md"), `# Debate Summary\n\n## Topic\n${title}\n\nThe council workspace is ready for position building, challenge, rebuttal, and convergence.\n`);
-  writeText(path.join(finalDir, "positions.md"), "# Positions\n\n- Position A\n- Position B\n");
-  writeText(path.join(finalDir, "rebuttals.md"), "# Rebuttals\n\n- Rebuttal placeholders\n");
-  writeText(path.join(finalDir, "consensus.md"), "# Consensus\n\n- Final consensus will be captured here.\n");
-  writeText(path.join(finalDir, "minority-concerns.md"), "# Minority Concerns\n\n- Record unresolved concerns here.\n");
-  writeText(path.join(finalDir, "recommendation.md"), "# Recommendation\n\n- The recommendation will be refined after convergence.\n");
+function buildTasks(acceptanceCriteria = []) {
+  const source = acceptanceCriteria.length > 0
+    ? acceptanceCriteria
+    : ["Clarify and decompose the implementation into concrete tasks."];
+
+  return source.map((criterion, index) => ({
+    id: `TASK-${String(index + 1).padStart(3, "0")}`,
+    title: criterion,
+    description: criterion,
+    status: "pending",
+    acceptance_criteria: [criterion]
+  }));
 }
 
-function writeReviewArtifacts(finalDir, title, evidence, rubric) {
-  writeText(path.join(finalDir, "review-summary.md"), `# Review Summary\n\n## Target\n${title}\n\n## Evidence Pack\n- Files indexed: ${evidence.file_count}\n- Docs found: ${evidence.doc_count}\n- Tests found: ${evidence.test_count}\n\nThis is a ready-to-review package for the council.\n`);
-  writeJson(path.join(finalDir, "scorecard.json"), {
-    rubric: rubric.name,
-    status: "pending_council_review",
-    total_score: null,
-    category_scores: Object.fromEntries((rubric.categories ?? []).map((category) => [category.id, null])),
-    blocking_findings: 0,
-    non_blocking_findings: 0,
-    confidence: "pending"
-  });
-  writeText(path.join(finalDir, "findings.md"), "# Findings\n\n- Findings will be added after evidence-based review.\n");
-  writeText(path.join(finalDir, "comments.md"), "# Comments\n\n- Structured review comments will be recorded here.\n");
-  writeText(path.join(finalDir, "gaps.md"), "# Gaps\n\n- Ticket-to-implementation gaps will be recorded here.\n");
-  writeText(path.join(finalDir, "strengths.md"), "# Strengths\n\n- Positive implementation observations will be recorded here.\n");
-  writeText(path.join(finalDir, "acceptance-coverage.md"), "# Acceptance Coverage\n\n- Acceptance coverage analysis will be recorded here.\n");
-  writeText(path.join(finalDir, "recommendation.md"), "# Recommendation\n\n- Pending council recommendation: pass, revise, or fail.\n");
+function collectStageResponses(workPath) {
+  const roundsRoot = path.join(workPath, "rounds");
+  if (!pathExists(roundsRoot)) {
+    return [];
+  }
+
+  const responses = [];
+  for (const round of fs.readdirSync(roundsRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory()).sort((a, b) => a.name.localeCompare(b.name))) {
+    const stageName = round.name.replace(/^\d+-/, "");
+    const stageDir = path.join(roundsRoot, round.name);
+    for (const file of fs.readdirSync(stageDir).filter((entry) => entry.endsWith(".response.md")).sort()) {
+      const fullPath = path.join(stageDir, file);
+      const content = readText(fullPath).trim();
+      if (!content) {
+        continue;
+      }
+
+      responses.push({
+        stage: stageName,
+        participant: file.replace(/\.response\.md$/, ""),
+        path: path.relative(workPath, fullPath).replace(/\\/g, "/"),
+        content
+      });
+    }
+  }
+
+  return responses;
+}
+
+function classifyStageResponseContent(content) {
+  const normalized = String(content ?? "").trim();
+  if (!normalized) {
+    return {
+      kind: "empty",
+      meaningful: false
+    };
+  }
+
+  if (/^# Pending Provider Response\b/i.test(normalized)) {
+    return {
+      kind: "pending",
+      meaningful: false
+    };
+  }
+
+  if (/^# Provider Result\b/i.test(normalized) && /\bBLOCKED:/i.test(normalized)) {
+    return {
+      kind: "blocked",
+      meaningful: false
+    };
+  }
+
+  return {
+    kind: "actual",
+    meaningful: true
+  };
+}
+
+function partitionStageResponses(responses = []) {
+  const actual = [];
+  const pending = [];
+  const blocked = [];
+
+  for (const response of responses) {
+    const classified = classifyStageResponseContent(response.content);
+    const enriched = {
+      ...response,
+      response_kind: classified.kind
+    };
+
+    if (classified.kind === "actual") {
+      actual.push(enriched);
+      continue;
+    }
+
+    if (classified.kind === "pending") {
+      pending.push(enriched);
+      continue;
+    }
+
+    if (classified.kind === "blocked") {
+      blocked.push(enriched);
+    }
+  }
+
+  return { actual, pending, blocked };
+}
+
+export { classifyStageResponseContent, partitionStageResponses };
+
+function writeResultText(filePath, lines) {
+  const content = Array.isArray(lines) ? lines.join("\n") : String(lines ?? "");
+  const normalized = content.trim();
+  if (!normalized) {
+    return false;
+  }
+  writeText(filePath, `${normalized}\n`);
+  return true;
+}
+
+function renderDebateOutput(responses) {
+  return responses.flatMap((entry, index) => [
+    `## ${index + 1}. ${entry.stage} - ${entry.participant}`,
+    "",
+    entry.content,
+    ""
+  ]);
+}
+
+function buildResponseArtifactContent(stage, participant, launchResult) {
+  const capturedOutput = String(launchResult.stdout ?? "").trim();
+  if (capturedOutput) {
+    return `${capturedOutput}\n`;
+  }
+
+  if (launchResult.launched) {
+    const lines = [
+      "# Provider Result",
+      "",
+      `Stage: ${stage.stage}`,
+      `Participant: ${participant.label ?? participant.name}`,
+      `Exit code: ${launchResult.exit_code ?? "unknown"}`,
+      `Timed out: ${launchResult.timed_out === true ? "yes" : "no"}`,
+      "",
+      "BLOCKED: The provider run did not produce Markdown output on stdout."
+    ];
+    if (launchResult.stderr) {
+      lines.push("", "## STDERR", "", "```text", String(launchResult.stderr).trim(), "```");
+    }
+    return `${lines.join("\n").trim()}\n`;
+  }
+
+  return [
+    "# Pending Provider Response",
+    "",
+    `Stage: ${stage.stage}`,
+    `Participant: ${participant.label ?? participant.name}`,
+    "",
+    "The prompt was prepared, but the provider was not launched automatically in this run.",
+    "",
+    "Open the matching `.prompt.md`, run it with the selected CLI, and replace this file with the actual response when available."
+  ].join("\n").trim() + "\n";
+}
+
+function createModeArtifacts(mode, context) {
+  const { resultPath, title, sections, acceptanceCriteria, responses, evidence, rubric } = context;
+  const responseGroups = partitionStageResponses(responses);
+  const consensusResponses = responseGroups.actual;
+  const files = [];
+  const tasks = buildTasks(acceptanceCriteria);
+  const debateLines = consensusResponses.length > 0
+    ? ["# Debate Output", "", ...renderDebateOutput(consensusResponses)]
+    : [];
+
+  const summaryLines = [
+    "# Summary",
+    "",
+    `Title: ${title}`,
+    `Mode: ${mode}`,
+    `Council outputs captured: ${consensusResponses.length}`,
+    `Pending provider responses: ${responseGroups.pending.length}`,
+    `Blocked provider responses: ${responseGroups.blocked.length}`,
+    "Status: pending approval",
+    ""
+  ];
+
+  if (consensusResponses.length === 0 && (responseGroups.pending.length > 0 || responseGroups.blocked.length > 0)) {
+    summaryLines.push(
+      "No AI consensus was captured for this run yet.",
+      responseGroups.pending.length > 0
+        ? "One or more providers were prepared but not launched, so the result package excludes placeholder responses."
+        : "One or more providers launched without producing usable Markdown output, so the result package excludes blocked responses.",
+      ""
+    );
+  }
+
+  if (mode === "plan") {
+    const planLines = [
+      "# Plan",
+      "",
+      "## Goal",
+      "",
+      sections.summary || sections.business_goal || title,
+      ""
+    ];
+    if (acceptanceCriteria.length > 0) {
+      planLines.push("## Acceptance Criteria", "", ...acceptanceCriteria.map((item) => `- ${item}`), "");
+    }
+    if (consensusResponses.length > 0) {
+      planLines.push("## Council Synthesis", "", ...renderDebateOutput(consensusResponses));
+    }
+
+    if (writeResultText(path.join(resultPath, "plan.md"), planLines)) files.push("plan.md");
+    if (writeResultText(path.join(resultPath, "implementation-outline.md"), [
+      "# Implementation Outline",
+      "",
+      ...tasks.flatMap((task, index) => [
+        `## ${index + 1}. ${task.title}`,
+        "",
+        task.description,
+        ""
+      ])
+    ])) files.push("implementation-outline.md");
+    writeJson(path.join(resultPath, "tasks.json"), { tasks });
+    files.push("tasks.json");
+    if (debateLines.length > 0 && writeResultText(path.join(resultPath, "debate-output.md"), debateLines)) files.push("debate-output.md");
+  } else if (mode === "design") {
+    const designLines = [
+      "# Solution Design",
+      "",
+      sections.summary || sections.technical_objective || title,
+      ""
+    ];
+    if (consensusResponses.length > 0) {
+      designLines.push("## Council Synthesis", "", ...renderDebateOutput(consensusResponses));
+    }
+    if (writeResultText(path.join(resultPath, "solution-design.md"), designLines)) files.push("solution-design.md");
+    if (debateLines.length > 0 && writeResultText(path.join(resultPath, "debate-output.md"), debateLines)) files.push("debate-output.md");
+  } else if (mode === "spike") {
+    const spikeLines = [
+      "# Spike",
+      "",
+      sections.summary || sections.technical_objective || title,
+      ""
+    ];
+    if (consensusResponses.length > 0) {
+      spikeLines.push("## Investigation Output", "", ...renderDebateOutput(consensusResponses));
+    }
+    if (writeResultText(path.join(resultPath, "spike.md"), spikeLines)) files.push("spike.md");
+    if (debateLines.length > 0 && writeResultText(path.join(resultPath, "debate-output.md"), debateLines)) files.push("debate-output.md");
+  } else if (mode === "debate") {
+    if (debateLines.length > 0 && writeResultText(path.join(resultPath, "debate-output.md"), debateLines)) files.push("debate-output.md");
+    if (writeResultText(path.join(resultPath, "recommendation.md"), [
+      "# Recommendation",
+      "",
+      consensusResponses.length > 0
+        ? `The council debate for **${title}** is captured in \`debate-output.md\`. Review the proposal, critique, refinement, synthesis, and validation outputs before approving.`
+        : `No debate output was captured for **${title}**.`
+    ])) files.push("recommendation.md");
+  } else {
+    if (writeResultText(path.join(resultPath, "findings.md"), [
+      "# Findings",
+      "",
+      consensusResponses.length > 0 ? renderDebateOutput(consensusResponses).join("\n") : "No review findings were captured."
+    ])) files.push("findings.md");
+    writeJson(path.join(resultPath, "scorecard.json"), {
+      rubric: rubric?.name ?? "review",
+      status: "pending_approval",
+      total_score: null,
+      blocking_findings: 0,
+      non_blocking_findings: 0,
+      confidence: consensusResponses.length > 0 ? "medium" : "low",
+      evidence: evidence
+        ? {
+          file_count: evidence.file_count,
+          doc_count: evidence.doc_count,
+          test_count: evidence.test_count
+        }
+        : null
+    });
+    files.push("scorecard.json");
+    if (writeResultText(path.join(resultPath, "recommendation.md"), [
+      "# Recommendation",
+      "",
+      consensusResponses.length > 0
+        ? `Review the findings for **${title}** and decide whether to approve, request changes, or reject the implementation.`
+        : `No review recommendation was captured for **${title}**.`
+    ])) files.push("recommendation.md");
+  }
+
+  summaryLines.push("Artifacts:", ...files.map((file) => `- ${file}`));
+  writeResultText(path.join(resultPath, "summary.md"), summaryLines);
+  return ["summary.md", ...files].sort();
 }
 
 function buildPromptText(mode, stageName, participantName, ticketText, evidence = null, stageArtifacts = [], participantModel = null) {
@@ -245,9 +506,8 @@ async function createDeliberationArtifacts(workPath, repoPath, workflow, deliber
       });
 
       const launchResult = await maybeLaunchPrompt(promptFile, outputFile, workPath, participant, launch, providerSessions[participant.name]);
-      if (launchResult.launched && launchResult.stdout) {
-        writeText(outputFile, launchResult.stdout);
-      }
+      const responseArtifactContent = buildResponseArtifactContent(stage, participant, launchResult);
+      writeText(outputFile, responseArtifactContent);
       if (launchResult.stdout) {
         writeText(path.join(stageDir, `${participant.name}.stdout.txt`), launchResult.stdout);
       }
@@ -305,11 +565,13 @@ async function createDeliberationArtifacts(workPath, repoPath, workflow, deliber
   return { executionResults: results, providerSessions };
 }
 
-function writeExecutionSummary(resultPath, executionResults, providerSessions) {
+function writeExecutionSummary(workPath, executionResults, providerSessions) {
+  const synthDir = path.join(workPath, "synth");
+  ensureDir(synthDir);
   const failures = executionResults.filter((entry) => entry.exit_code && entry.exit_code !== 0);
   const successful = executionResults.filter((entry) => entry.exit_code === 0);
 
-  writeJson(path.join(resultPath, "execution-summary.json"), {
+  writeJson(path.join(synthDir, "execution-summary.json"), {
     total_steps: executionResults.length,
     successful_steps: successful.length,
     failed_steps: failures.length,
@@ -327,7 +589,7 @@ function writeExecutionSummary(resultPath, executionResults, providerSessions) {
   });
 
   writeText(
-    path.join(resultPath, "execution-summary.md"),
+    path.join(synthDir, "execution-summary.md"),
     `# Execution Summary
 
 ## Overall
@@ -366,10 +628,60 @@ export function toolingStatus(frameworkRoot, repoPath) {
   };
 }
 
+function latestSession(rootPath, outputRoot) {
+  const runPath = latestRunPath(rootPath, outputRoot);
+  if (!runPath) {
+    return null;
+  }
+
+  return {
+    runPath,
+    workPath: path.join(runPath, "work"),
+    resultPath: path.join(runPath, "result"),
+    sessionPath: path.join(runPath, "work", "session", "session.json"),
+    session: readJson(path.join(runPath, "work", "session", "session.json"), {})
+  };
+}
+
+function availableActions(session) {
+  if (session.status === "pending_approval") {
+    return ["approve", "request_changes", "reject"];
+  }
+  if (session.status === "approved") {
+    return ["export_awf", "start_new_run"];
+  }
+  if (session.status === "changes_requested" || session.status === "rejected") {
+    return ["start_new_run"];
+  }
+  return [];
+}
+
+function buildStatusPayload(frameworkRoot, repoPath, outputRoot, latest) {
+  const finalFiles = pathExists(latest.resultPath) ? fs.readdirSync(latest.resultPath).sort() : [];
+  return {
+    ok: true,
+    framework_root: frameworkRoot,
+    repo_path: repoPath,
+    output_root: outputRoot,
+    has_runs: true,
+    latest_run: latest.runPath,
+    mode: latest.session.mode ?? null,
+    family: latest.session.family ?? null,
+    title: latest.session.title ?? null,
+    review_repo_path: latest.session.review_repo?.repo_path ?? null,
+    current_stage: latest.session.current_stage ?? null,
+    status: latest.session.status ?? "prepared",
+    final_files: finalFiles,
+    available_actions: availableActions(latest.session),
+    review: latest.session.review ?? null,
+    recommended_action: latest.session.next_action ?? "Review result/ first, then inspect work/ if you need the intermediate deliberation trail."
+  };
+}
+
 export function getStatus(frameworkRoot, repoPath) {
   const config = loadConfig(frameworkRoot, repoPath);
   const outputRoot = resolveOutputRoot(repoPath, config);
-  const latest = latestRunPath(repoPath, outputRoot);
+  const latest = latestSession(repoPath, outputRoot);
   if (!latest) {
     return {
       ok: true,
@@ -381,26 +693,191 @@ export function getStatus(frameworkRoot, repoPath) {
     };
   }
 
-  const session = readJson(path.join(latest, "session", "session.json"), {});
-  const finalFiles = pathExists(path.join(latest, "result")) ? fs.readdirSync(path.join(latest, "result")).sort() : [];
-  return {
-    ok: true,
-    framework_root: frameworkRoot,
-    repo_path: repoPath,
-    output_root: outputRoot,
-    has_runs: true,
-    latest_run: latest,
-    mode: session.mode ?? null,
-    family: session.family ?? null,
-    title: session.title ?? null,
-    repo_path: session.review?.repo_path ?? null,
-    final_files: finalFiles,
-    recommended_action: session.next_action ?? "Review result/ first, then inspect work/ if you need the intermediate deliberation trail."
-  };
+  return buildStatusPayload(frameworkRoot, repoPath, outputRoot, latest);
 }
 
 export function resumeLatest(frameworkRoot, repoPath) {
-  return getStatus(frameworkRoot, repoPath);
+  const status = getStatus(frameworkRoot, repoPath);
+  return status.has_runs ? { ...status, resume_status: "resumed" } : status;
+}
+
+function writeLatestSession(latest, session) {
+  writeJson(latest.sessionPath, session);
+  return session;
+}
+
+function buildAwfArtifactsFromSession(latest) {
+  const inputMetadata = readJson(path.join(latest.workPath, "input", "input-metadata.json"), {});
+  const ticketText = readText(path.join(latest.workPath, "input", "ticket-definition.md"));
+  const sections = parseTicketSections(ticketText);
+  const acceptanceCriteria = extractList(sections.acceptance_criteria);
+  const tasksPayload = readJson(path.join(latest.resultPath, "tasks.json"), { tasks: [] });
+  const tasks = Array.isArray(tasksPayload.tasks) && tasksPayload.tasks.length > 0
+    ? tasksPayload.tasks
+    : buildTasks(acceptanceCriteria);
+
+  const story = {
+    story_id: latest.session.run_id ?? slugify(latest.session.title ?? inputMetadata.title ?? "council-run"),
+    title: latest.session.title ?? inputMetadata.title ?? "Council approved result",
+    goal: sections.summary || sections.business_goal || latest.session.title || "Council approved result",
+    actors: [],
+    in_scope: extractList(sections.scope),
+    out_of_scope: [],
+    dependencies: [],
+    constraints: extractList(sections.constraints),
+    references: [],
+    verification_evidence: [],
+    acceptance_criteria: acceptanceCriteria,
+    status: "planned",
+    created_at: nowIso(),
+    updated_at: nowIso()
+  };
+
+  return {
+    story,
+    tasks: {
+      story_id: story.story_id,
+      generated_at: nowIso(),
+      tasks: tasks.map((task, index) => ({
+        id: task.id ?? `TASK-${String(index + 1).padStart(3, "0")}`,
+        title: task.title,
+        description: task.description ?? task.title,
+        priority_class: "standard_feature",
+        status: "pending",
+        dependencies: [],
+        ac_refs: acceptanceCriteria[index] ? [`AC-${String(index + 1).padStart(3, "0")}`] : [],
+        verification: []
+      }))
+    },
+    acceptance: {
+      story_id: story.story_id,
+      criteria: acceptanceCriteria.map((text, index) => ({
+        id: `AC-${String(index + 1).padStart(3, "0")}`,
+        text,
+        status: "pending",
+        task_ids: tasks[index] ? [tasks[index].id ?? `TASK-${String(index + 1).padStart(3, "0")}`] : []
+      }))
+    }
+  };
+}
+
+function exportRunToAwf(latest, repoPath, config) {
+  const awf = buildAwfArtifactsFromSession(latest);
+  const wiRoot = path.join(repoPath, ".wi");
+  const runtimeDir = path.join(wiRoot, "runtime");
+  ensureDir(runtimeDir);
+  ensureDir(path.join(wiRoot, "logs"));
+
+  writeJson(path.join(wiRoot, "story.json"), awf.story);
+  writeJson(path.join(wiRoot, "tasks.json"), awf.tasks);
+  writeJson(path.join(wiRoot, "acceptance.json"), awf.acceptance);
+  writeJson(path.join(wiRoot, "state.json"), {
+    story_id: awf.story.story_id,
+    story_status: "planned",
+    current_phase: "implementation_ready",
+    active_task_id: null,
+    next_task_id: awf.tasks.tasks[0]?.id ?? null,
+    review_status: "not_requested",
+    last_completed_task_id: null,
+    updated_at: nowIso()
+  });
+  writeJson(path.join(runtimeDir, "orientation.json"), {
+    current_slice: awf.story.title,
+    last_task_id: null,
+    last_task_outcome: "not_started",
+    changed_files: [],
+    key_changes: [],
+    open_risks: [],
+    next_task_considerations: ["Imported from AI Council approved result."],
+    refreshed_at: nowIso()
+  });
+  writeJson(path.join(runtimeDir, "task.json"), {
+    generated_at: nowIso(),
+    story: awf.story,
+    task: null,
+    next_phase: "implementer"
+  });
+  writeJson(path.join(wiRoot, "config.json"), {
+    default_adapter: config.user?.default_provider ?? config.providers?.default_provider ?? "codex",
+    default_verification: [],
+    adapters: {},
+    phase_execution: {
+      implementation: {
+        adapter: config.user?.default_provider ?? config.providers?.default_provider ?? "codex",
+        model: null,
+        agent: "awf-implementer",
+        custom_prompt: null
+      }
+    }
+  });
+  writeText(path.join(wiRoot, "README.md"), `# AWF Import\n\nImported from approved AI Council run \`${latest.session.run_id}\`.\n`);
+
+  return {
+    ok: true,
+    wi_root: wiRoot,
+    story_id: awf.story.story_id,
+    next_task_id: awf.tasks.tasks[0]?.id ?? null
+  };
+}
+
+export function decideLatest(frameworkRoot, repoPath, options = {}) {
+  const config = loadConfig(frameworkRoot, repoPath);
+  const outputRoot = resolveOutputRoot(repoPath, config, options);
+  const latest = latestSession(repoPath, outputRoot);
+  if (!latest) {
+    throw new Error("No AI Council runs exist yet.");
+  }
+
+  const decision = String(options.decision ?? "").trim();
+  if (!["approve", "request_changes", "reject"].includes(decision)) {
+    throw new Error("Decision must be approve, request_changes, or reject.");
+  }
+
+  latest.session.status = decision === "approve" ? "approved" : decision === "request_changes" ? "changes_requested" : "rejected";
+  latest.session.current_stage = decision === "approve" ? "approved" : decision;
+  latest.session.review = {
+    decision,
+    prompt: String(options.prompt ?? options.reason ?? "").trim() || null,
+    notes: String(options.notes ?? "").trim() || null,
+    decided_at: nowIso()
+  };
+  latest.session.pending_actions = availableActions(latest.session);
+  latest.session.next_action = decision === "approve"
+    ? "Approved result is ready. Export to AWF if you want to start implementation."
+    : "Start a new council run and use the review prompt as the change request context.";
+
+  let awfExport = null;
+  if (decision === "approve" && options.create_awf === true) {
+    awfExport = exportRunToAwf(latest, repoPath, config);
+  }
+
+  writeLatestSession(latest, latest.session);
+  return {
+    ok: true,
+    status: latest.session.status,
+    current_stage: latest.session.current_stage,
+    available_actions: availableActions(latest.session),
+    review: latest.session.review,
+    awf_export: awfExport
+  };
+}
+
+export function exportLatestToAwf(frameworkRoot, repoPath, options = {}) {
+  const config = loadConfig(frameworkRoot, repoPath);
+  const outputRoot = resolveOutputRoot(repoPath, config, options);
+  const latest = latestSession(repoPath, outputRoot);
+  if (!latest) {
+    throw new Error("No AI Council runs exist yet.");
+  }
+  if (latest.session.status !== "approved") {
+    throw new Error("Only an approved AI Council result can be exported to AWF.");
+  }
+
+  const exported = exportRunToAwf(latest, repoPath, config);
+  latest.session.pending_actions = availableActions(latest.session);
+  latest.session.next_action = "AWF artifacts are ready. Start implementation from .wi/.";
+  writeLatestSession(latest, latest.session);
+  return exported;
 }
 
 export async function runCouncil(frameworkRoot, repoPath, options = {}) {
@@ -413,10 +890,11 @@ export async function runCouncil(frameworkRoot, repoPath, options = {}) {
     throw new Error(`Unsupported mode: ${mode}`);
   }
 
-  const title = options.title ?? options.prompt ?? options["jira-url"] ?? options["ticket-file"] ?? `${mode} council run`;
+  const title = options.title ?? options.prompt ?? options["jira-url"] ?? options["ticket-file"] ?? options["ticket-source"] ?? `${mode} council run`;
   const { runId, runPath, workPath, resultPath } = createRunWorkspace(repoPath, outputRoot, mode, title);
   emitProgress(onProgress, { type: "run_created", mode, run_path: runPath, result_path: resultPath, work_path: workPath });
   const normalizedInput = normalizeInput(workPath, options);
+  const clarificationQuestions = buildClarificationQuestions(normalizedInput.canonical_content, mode);
   emitProgress(onProgress, {
     type: "input_normalized",
     ticket_path: path.join(workPath, "input", "ticket-definition.md"),
@@ -455,8 +933,12 @@ export async function runCouncil(frameworkRoot, repoPath, options = {}) {
     title: normalizedInput.metadata.title,
     workflow,
     council: council.name,
-    review: evidence ? { repo_path: evidence.repo_path } : null,
-    next_action: "Open result/ for the final artifacts. Use work/ only when you need the intermediate deliberation trail.",
+    status: "running",
+    current_stage: "deliberation",
+    pending_actions: [],
+    review: null,
+    review_repo: evidence ? { repo_path: evidence.repo_path } : null,
+    next_action: "Waiting for council output.",
     effective_config: {
       provider_preference: options.provider ?? config.user?.default_provider ?? config.providers.default_provider,
       output_root: outputRoot,
@@ -471,6 +953,35 @@ export async function runCouncil(frameworkRoot, repoPath, options = {}) {
 
   writeSessionManifest(workPath, manifest);
   writeJson(path.join(workPath, "synth", "input-summary.json"), normalizedInput.metadata);
+  if (clarificationQuestions.length > 0 && !(Array.isArray(options.clarification_answers) && options.clarification_answers.length > 0)) {
+    writeJson(path.join(workPath, "input", "clarification.json"), {
+      status: "awaiting_clarification",
+      question_count: clarificationQuestions.length,
+      questions: clarificationQuestions
+    });
+    manifest.status = "awaiting_clarification";
+    manifest.current_stage = "awaiting_clarification";
+    manifest.pending_actions = ["answer_clarifications"];
+    manifest.questions = clarificationQuestions;
+    manifest.next_action = "Answer the clarification questions before proposal starts.";
+    writeLatestSession({
+      sessionPath: path.join(workPath, "session", "session.json")
+    }, manifest);
+
+    return {
+      ok: true,
+      status: manifest.status,
+      run_id: runId,
+      run_path: runPath,
+      result_path: resultPath,
+      work_path: workPath,
+      output_root: outputRoot,
+      mode,
+      questions: clarificationQuestions,
+      question_count: clarificationQuestions.length,
+      next_action: manifest.next_action
+    };
+  }
   writeJson(path.join(workPath, "session", "visual-reference.json"), { council: getCouncilVisualReference() });
   writeText(
     path.join(workPath, "session", "visual-reference.md"),
@@ -506,27 +1017,45 @@ ${getDeliberationCycle().map((entry) => `| ${entry.stage} | ${entry.leader} | ${
     onProgress
   );
 
-  const finalDir = resultPath;
-  if (mode === "plan") {
-    writePlanArtifacts(finalDir, normalizedInput.metadata.title, normalizedInput.acceptance_criteria);
-  } else if (mode === "design") {
-    writeDesignArtifacts(finalDir, normalizedInput.metadata.title);
-  } else if (mode === "spike") {
-    writeSpikeArtifacts(finalDir, normalizedInput.metadata.title);
-  } else if (mode === "debate") {
-    writeDebateArtifacts(finalDir, normalizedInput.metadata.title);
-  } else {
-    writeReviewArtifacts(finalDir, normalizedInput.metadata.title, evidence, config.rubrics.review);
-  }
-  writeExecutionSummary(finalDir, executionResults, providerSessions);
+  removeDir(resultPath);
+  ensureDir(resultPath);
+  const responses = collectStageResponses(workPath);
+  const sections = parseTicketSections(normalizedInput.canonical_content);
+  const deliverables = createModeArtifacts(mode, {
+    resultPath,
+    title: normalizedInput.metadata.title,
+    sections,
+    acceptanceCriteria: normalizedInput.acceptance_criteria,
+    responses,
+    evidence,
+    rubric: config.rubrics.review
+  });
+  writeExecutionSummary(workPath, executionResults, providerSessions);
+  const responseGroups = partitionStageResponses(responses);
 
-  writeTimeline(workPath, "final_artifacts_created", { final_outputs: workflow.final_outputs });
+  manifest.status = "pending_approval";
+  manifest.current_stage = "awaiting_approval";
+  manifest.pending_actions = ["approve", "request_changes", "reject"];
+  manifest.deliverables = deliverables;
+  manifest.response_summary = {
+    actual: responseGroups.actual.length,
+    pending: responseGroups.pending.length,
+    blocked: responseGroups.blocked.length
+  };
+  manifest.next_action = responseGroups.actual.length === 0 && responseGroups.pending.length > 0
+    ? "Providers were prepared but not launched. Enable auto-launch or rerun with launch enabled, then review result/."
+    : "Review result/ and choose approve, request changes, or reject.";
+  writeLatestSession({
+    sessionPath: path.join(workPath, "session", "session.json")
+  }, manifest);
+
+  writeTimeline(workPath, "final_artifacts_created", { final_outputs: deliverables });
   writeCouncilLog(workPath, formatCouncilLog("Vector", "Final artifacts are ready for review and follow-up AI work."));
-  emitProgress(onProgress, { type: "final_artifacts_created", result_path: resultPath, final_outputs: workflow.final_outputs });
+  emitProgress(onProgress, { type: "final_artifacts_created", result_path: resultPath, final_outputs: deliverables });
 
   return {
     ok: true,
-    status: "prepared",
+    status: manifest.status,
     run_id: runId,
     run_path: runPath,
     result_path: resultPath,
@@ -544,9 +1073,10 @@ ${getDeliberationCycle().map((entry) => `| ${entry.stage} | ${entry.leader} | ${
       participant_labels: stage.participants.map((participant) => participant.label ?? participant.name),
       participant_models: stage.participants.map((participant) => participant.model ?? null)
     })),
-    final_outputs: workflow.final_outputs,
+    final_outputs: deliverables,
     providers,
     evidence_summary: evidence,
+    available_actions: availableActions(manifest),
     next_action: manifest.next_action
   };
 }
