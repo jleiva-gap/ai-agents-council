@@ -1,6 +1,6 @@
 # Quickstart
 
-The preferred way to use AI Council is the guided shell. The direct commands below are still supported when you want scripting or a one-shot run.
+The preferred way to use AI Agents Council is the guided shell. The direct commands below are still supported when you want scripting or a one-shot run.
 
 ## Guided Shell
 
@@ -8,7 +8,7 @@ The preferred way to use AI Council is the guided shell. The direct commands bel
 ai-council shell --repo C:\repo
 ```
 
-You can also point `--repo` at a nested folder inside that repository. AI Council will resolve it to the repo root automatically.
+You can also point `--repo` at a nested folder inside that repository. AI Agents Council will resolve it to the repo root automatically.
 
 On first run, the shell will:
 
@@ -58,7 +58,7 @@ If a provider launch fails, check:
 By default these runs are written under `.ai-council/result`. You can change that in the shell configuration flow or pass `--output-root <path>` on the command line.
 Repo-specific settings, stage assignments, and provider startup preflight commands are stored under `.ai-council/settings.json`.
 
-When you choose `Request changes`, AI Council creates a follow-up run using the latest ticket plus the change request context, rewrites the newest `result/` artifacts, and returns to pending approval.
+When you choose `Request changes`, AI Agents Council creates a follow-up run using the latest ticket plus the change request context, rewrites the newest `result/` artifacts, and returns to pending approval.
 
 ## Shell Tips
 

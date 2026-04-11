@@ -1,6 +1,6 @@
 # Council Identity
 
-AI Council uses a fixed naming layer to keep the UX, prompts, and logs consistent.
+AI Agents Council uses a fixed naming layer to keep the UX, prompts, and logs consistent.
 
 | Function | Identity | Log Example |
 | --- | --- | --- |

@@ -827,7 +827,7 @@ test("clarifyLatest continues the council after clarification answers are suppli
       launch_command: [
         "node",
         "-e",
-        "let data='';process.stdin.on('data',chunk=>data+=chunk);process.stdin.on('end',()=>{if(data.includes('AI Council Clarification Prompt')){process.stdout.write(JSON.stringify({status:'needs_clarification',summary:'Need one blocking clarification.',questions:[{id:'CLARIFY-Q001',prompt:'Reading \"Add audit trail\", what observable outcome proves the work is done?',required:true}],risks:[{code:'missing_completion_signal',level:'blocking',summary:'Planning would guess at the delivery target.'}]}));}else{process.stdout.write('# Proposal\\n\\nThe council can proceed with the clarified request.');}});"
+        "let data='';process.stdin.on('data',chunk=>data+=chunk);process.stdin.on('end',()=>{if(data.includes('AI Agents Council Clarification Prompt')){process.stdout.write(JSON.stringify({status:'needs_clarification',summary:'Need one blocking clarification.',questions:[{id:'CLARIFY-Q001',prompt:'Reading \"Add audit trail\", what observable outcome proves the work is done?',required:true}],risks:[{code:'missing_completion_signal',level:'blocking',summary:'Planning would guess at the delivery target.'}]}));}else{process.stdout.write('# Proposal\\n\\nThe council can proceed with the clarified request.');}});"
       ]
     }
   };

@@ -86,7 +86,7 @@ function writeBanner() {
   const top = `+${"=".repeat(innerWidth)}+`;
   const bottom = `+${"=".repeat(innerWidth)}+`;
   const blank = `|${" ".repeat(innerWidth)}|`;
-  const title = "[*] AI COUNCIL";
+  const title = "[*] AI AGENTS COUNCIL";
   const subtitle = "Command-line orchestration for council runs.";
   const cycle = "proposal -> critique -> refinement -> synthesis -> validation";
   const roster = "Axiom | Vector | Forge | Sentinel";
@@ -136,7 +136,7 @@ function renderWelcome(tools, settings, repoPath) {
   console.log("");
   writeBanner();
   panel(`${icon("app")} Welcome`, [
-    "AI Council is a multi-agent engineering console for proposal, critique, refinement, synthesis, and validation.",
+    "AI Agents Council is a multi-agent engineering console for proposal, critique, refinement, synthesis, and validation.",
     "",
     `Target repo: ${repoPath}`,
     `Output root: ${settings.output_root ?? ".ai-council/result"}`,
@@ -834,7 +834,7 @@ async function promptClarificationAnswers(rl, questions = []) {
   }
 
   panel(`${icon("warn")} Clarification Needed`, [
-    "AI Council found blocking questions before proposal can safely start.",
+    "AI Agents Council found blocking questions before proposal can safely start.",
     ...questions.map((question, index) => `${index + 1}. ${question.prompt}`)
   ]);
 

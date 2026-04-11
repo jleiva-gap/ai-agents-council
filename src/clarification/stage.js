@@ -4,7 +4,7 @@ import { maybeLaunchPrompt, resolveProvidersByNames } from "../providers/index.j
 import { writeJson, writeText } from "../utils/fs.js";
 
 function buildClarificationPrompt({ mode, title, ticketText, participantLabel }) {
-  return `# AI Council Clarification Prompt
+  return `# AI Agents Council Clarification Prompt
 
 ## Mode
 ${mode}

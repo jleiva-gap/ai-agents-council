@@ -409,7 +409,7 @@ function buildPromptText(mode, stageName, participantName, ticketText, evidence 
     ? `\n## Prior Stage Artifacts\n${stageArtifacts.map((item) => `- ${item}`).join("\n")}\n`
     : "";
 
-  return `# AI Council Prompt
+  return `# AI Agents Council Prompt
 
 ## Mode
 ${mode}
@@ -1135,7 +1135,7 @@ function buildAwfQuestionsMarkdown(answers = []) {
   return [
     "# Imported Clarification Context",
     "",
-    "These answers were captured during the approved AI Council run.",
+    "These answers were captured during the approved AI Agents Council run.",
     "",
     ...answers.flatMap((entry, index) => [
       `${index + 1}. ${entry.prompt}`,
@@ -1272,7 +1272,7 @@ function buildFallbackAwfPlan(latest, story, tasks) {
   const lines = [
     `# ${story.title}`,
     "",
-    "## Imported From AI Council",
+    "## Imported From AI Agents Council",
     "",
     `Run ID: ${latest.session.run_id}`,
     `Mode: ${latest.session.mode ?? "plan"}`,
@@ -1376,9 +1376,9 @@ function buildCouncilImportMetadata(latest, repoPath, story, tasks, copiedArtifa
 function buildCouncilHandoffMarkdown(latest, story, task, acceptance, copiedArtifacts, importMetadata) {
   const acceptanceSlice = buildAwfTaskAcceptanceSlice(acceptance, task);
   const lines = [
-    "# AI Council Implementation Handoff",
+    "# AI Agents Council Implementation Handoff",
     "",
-    `Imported from approved AI Council run \`${latest.session.run_id}\`.`,
+    `Imported from approved AI Agents Council run \`${latest.session.run_id}\`.`,
     "",
     "Start with `.wi/runtime/task.json` and use this handoff for provenance plus the larger plan/design context.",
     "",
@@ -1491,7 +1491,7 @@ function splitTasksIntoStoryChunks(tasks, preferredMaxTasks = STORY_SPLIT_MAX_TA
 function buildStoryExportDescription(latest, story, tasks, index = 0, total = 1) {
   const focus = tasks.map((task) => task.title).filter(Boolean).slice(0, 3);
   const descriptionLines = [
-    story.goal || story.title || "Approved AI Council story."
+    story.goal || story.title || "Approved AI Agents Council story."
   ];
 
   if (total > 1) {
@@ -1772,7 +1772,7 @@ function buildAwfArtifactsFromSession(latest) {
           description: task.description ?? task.title ?? `Council task ${index + 1}`,
           priority_class: task.priority_class ?? "standard_feature",
           priority_rank: task.priority_rank ?? 3,
-          priority_reason: task.priority_reason ?? "Imported from approved AI Council result.",
+          priority_reason: task.priority_reason ?? "Imported from approved AI Agents Council result.",
           status: "pending",
           dependencies: normalizeStringArray(task.dependencies ?? []),
           ac_refs: derivedRefs,
@@ -1913,7 +1913,7 @@ function exportRunToAwf(latest, repoPath, config) {
     writeText(path.join(logsDir, "review.ndjson"), "");
   }
   if (!pathExists(path.join(wiRoot, "README.md"))) {
-    writeText(path.join(wiRoot, "README.md"), `# AWF Import\n\nImported from approved AI Council run \`${latest.session.run_id}\`.\n`);
+    writeText(path.join(wiRoot, "README.md"), `# AWF Import\n\nImported from approved AI Agents Council run \`${latest.session.run_id}\`.\n`);
   }
 
   return {
@@ -1939,7 +1939,7 @@ async function rerunLatestWithChanges(frameworkRoot, repoPath, latest, config, o
         "## Revision Request",
         prompt,
         "",
-        `Revise the latest AI Council output to address this feedback while preserving the original request unless the feedback explicitly changes it.`
+        `Revise the latest AI Agents Council output to address this feedback while preserving the original request unless the feedback explicitly changes it.`
       ].join("\n")
       : ""
   ].filter(Boolean).join("\n\n").trim();
@@ -1975,7 +1975,7 @@ export function previewLatestStoryPackaging(frameworkRoot, repoPath, options = {
   const outputRoot = resolveOutputRoot(resolvedRepoPath, config, options);
   const latest = latestSession(resolvedRepoPath, outputRoot);
   if (!latest) {
-    throw new Error("No AI Council runs exist yet.");
+    throw new Error("No AI Agents Council runs exist yet.");
   }
 
   return {
@@ -1993,11 +1993,11 @@ export async function clarifyLatest(frameworkRoot, repoPath, options = {}) {
   const outputRoot = resolveOutputRoot(resolvedRepoPath, config, options);
   const latest = latestSession(resolvedRepoPath, outputRoot);
   if (!latest) {
-    throw new Error("No AI Council runs exist yet.");
+    throw new Error("No AI Agents Council runs exist yet.");
   }
 
   if (latest.session.status !== "awaiting_clarification") {
-    throw new Error("The latest AI Council run is not waiting for clarification.");
+    throw new Error("The latest AI Agents Council run is not waiting for clarification.");
   }
 
   const inputDir = path.join(latest.workPath, "input");
@@ -2036,7 +2036,7 @@ export async function decideLatest(frameworkRoot, repoPath, options = {}) {
   const outputRoot = resolveOutputRoot(resolvedRepoPath, config, options);
   const latest = latestSession(resolvedRepoPath, outputRoot);
   if (!latest) {
-    throw new Error("No AI Council runs exist yet.");
+    throw new Error("No AI Agents Council runs exist yet.");
   }
 
   const decision = String(options.decision ?? "").trim();
@@ -2133,10 +2133,10 @@ export function exportLatestToAwf(frameworkRoot, repoPath, options = {}) {
   const outputRoot = resolveOutputRoot(resolvedRepoPath, config, options);
   const latest = latestSession(resolvedRepoPath, outputRoot);
   if (!latest) {
-    throw new Error("No AI Council runs exist yet.");
+    throw new Error("No AI Agents Council runs exist yet.");
   }
   if (latest.session.status !== "approved") {
-    throw new Error("Only an approved AI Council result can be exported to AWF.");
+    throw new Error("Only an approved AI Agents Council result can be exported to AWF.");
   }
 
   const exported = exportRunToAwf(latest, resolvedRepoPath, config);
@@ -2224,8 +2224,8 @@ export async function runCouncil(frameworkRoot, repoPath, options = {}) {
       clarificationResult = normalizeClarificationResult({
         status: fallbackQuestions.length > 0 ? "needs_clarification" : "ready_for_planning",
         summary: clarificationStage.launch_result?.launched
-          ? "The clarification stage did not return a structured payload, so AI Council used local fallback questions."
-          : "AI clarification was not launched, so AI Council used local fallback questions.",
+          ? "The clarification stage did not return a structured payload, so AI Agents Council used local fallback questions."
+          : "AI clarification was not launched, so AI Agents Council used local fallback questions.",
         questions: fallbackQuestions
       });
     }
