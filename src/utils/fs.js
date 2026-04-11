@@ -81,9 +81,85 @@ export function commandExists(commandName) {
     return false;
   }
 
-  const locator = process.platform === "win32" ? "where" : "which";
-  const result = spawnSync(locator, [commandName], { encoding: "utf8" });
-  return result.status === 0;
+  const normalizedCommand = String(commandName).trim();
+  if (!normalizedCommand) {
+    return false;
+  }
+
+  const candidatePaths = [];
+  const hasExplicitPath = normalizedCommand.includes(path.sep) || (process.platform === "win32" && normalizedCommand.includes("/"));
+  const knownExtensions = process.platform === "win32"
+    ? String(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+      .split(";")
+      .map((value) => value.trim())
+      .filter(Boolean)
+    : [""];
+
+  if (path.isAbsolute(normalizedCommand) || hasExplicitPath) {
+    candidatePaths.push(normalizedCommand);
+    if (process.platform === "win32" && !path.extname(normalizedCommand)) {
+      for (const extension of knownExtensions) {
+        candidatePaths.push(`${normalizedCommand}${extension}`);
+      }
+    }
+  } else {
+    for (const entry of String(process.env.PATH ?? "").split(path.delimiter)) {
+      const trimmedEntry = entry.trim().replace(/^"+|"+$/g, "");
+      if (!trimmedEntry) {
+        continue;
+      }
+
+      candidatePaths.push(path.join(trimmedEntry, normalizedCommand));
+      if (process.platform === "win32" && !path.extname(normalizedCommand)) {
+        for (const extension of knownExtensions) {
+          candidatePaths.push(path.join(trimmedEntry, `${normalizedCommand}${extension}`));
+        }
+      }
+    }
+  }
+
+  return candidatePaths.some((candidatePath) => pathExists(candidatePath));
+}
+
+function normalizeRepoCandidate(targetPath = process.cwd()) {
+  const resolvedPath = path.resolve(targetPath);
+  if (!pathExists(resolvedPath)) {
+    return resolvedPath;
+  }
+
+  const stats = fs.statSync(resolvedPath);
+  return stats.isDirectory() ? resolvedPath : path.dirname(resolvedPath);
+}
+
+function findAncestorWithMarker(startPath, markerName) {
+  let current = normalizeRepoCandidate(startPath);
+
+  while (true) {
+    if (pathExists(path.join(current, markerName))) {
+      return current;
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+
+    current = parent;
+  }
+}
+
+export function resolveRepoRoot(targetPath = process.cwd()) {
+  const candidate = normalizeRepoCandidate(targetPath);
+
+  if (commandExists("git")) {
+    const result = spawnSync("git", ["-C", candidate, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+    const gitRoot = String(result.stdout ?? "").trim();
+    if (result.status === 0 && gitRoot) {
+      return path.resolve(gitRoot);
+    }
+  }
+
+  return findAncestorWithMarker(candidate, ".git") ?? candidate;
 }
 
 export function slugify(value) {

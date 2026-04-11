@@ -3,8 +3,8 @@ import readline from "node:readline/promises";
 
 import { hasCompletedFirstRun, loadRepoSettings, saveRepoSettings } from "../core/config.js";
 import { getCouncilVisualReference, getDeliberationCycle } from "../core/identity.js";
-import { decideLatest, exportLatestToAwf, getStatus, runCouncil, toolingStatus } from "../core/workflow.js";
-import { previewNormalizedInput } from "../input/normalize.js";
+import { clarifyLatest, decideLatest, exportLatestToAwf, getStatus, previewLatestStoryPackaging, runCouncil, toolingStatus } from "../core/workflow.js";
+import { formatPanelLines } from "./render.js";
 
 const ANSI = {
   reset: "\u001b[0m",
@@ -58,21 +58,10 @@ function icon(name) {
   return icons[name] ?? "[*]";
 }
 
-function truncate(value, width) {
-  const text = String(value ?? "");
-  if (text.length <= width) return text;
-  return `${text.slice(0, Math.max(0, width - 3))}...`;
-}
-
 function panel(title, rows = []) {
-  const width = 92;
-  console.log(strong(`+${"-".repeat(width - 2)}+`));
-  console.log(strong(`| ${truncate(title, width - 4).padEnd(width - 4)} |`));
-  console.log(strong(`+${"-".repeat(width - 2)}+`));
-  for (const row of rows) {
-    console.log(`| ${truncate(row, width - 4).padEnd(width - 4)} |`);
+  for (const line of formatPanelLines(title, rows)) {
+    console.log(line.strong ? strong(line.text) : line.text);
   }
-  console.log(strong(`+${"-".repeat(width - 2)}+`));
 }
 
 function clearScreen() {
@@ -83,18 +72,62 @@ async function waitForContinue(rl, label = "Press Enter to continue...") {
   await rl.question(label);
 }
 
+function centerText(text, width) {
+  const raw = String(text ?? "");
+  const padding = Math.max(0, width - raw.length);
+  const left = Math.floor(padding / 2);
+  const right = padding - left;
+  return `${" ".repeat(left)}${raw}${" ".repeat(right)}`;
+}
+
 function writeBanner() {
-  const lines = [
-    "    _    ___    ______                     _ __ ",
-    "   / \\  |_ _|  / ____/___  __  _______  __(_) / ",
-    "  / _ \\  / /  / /   / __ \\/ / / / __ \\/ / / /  ",
-    " / ___ \\/ /  / /___/ /_/ / /_/ / / / / /_/ /   ",
-    "/_/  /_/___/  \\____/\\____/\\__,_/_/ /_/\\__,_/_/  ",
-    "AI Council"
+  const width = Math.min(88, Math.max(64, (process.stdout.columns ?? 88) - 8));
+  const innerWidth = width - 2;
+  const top = `+${"=".repeat(innerWidth)}+`;
+  const bottom = `+${"=".repeat(innerWidth)}+`;
+  const blank = `|${" ".repeat(innerWidth)}|`;
+  const title = "[*] AI COUNCIL";
+  const subtitle = "Command-line orchestration for council runs.";
+  const cycle = "proposal -> critique -> refinement -> synthesis -> validation";
+  const roster = "Axiom | Vector | Forge | Sentinel";
+  const bannerRows = [
+    top,
+    blank,
+    `|${centerText(title, innerWidth)}|`,
+    `|${centerText(subtitle, innerWidth)}|`,
+    `|${centerText(cycle, innerWidth)}|`,
+    `|${centerText(roster, innerWidth)}|`,
+    blank,
+    bottom
   ];
 
-  for (const line of lines) {
-    console.log(accent(line));
+  for (const line of bannerRows) {
+    if (line === top || line === bottom) {
+      console.log(accent(line));
+      continue;
+    }
+
+    if (line === blank) {
+      console.log(muted(line));
+      continue;
+    }
+
+    if (line.includes(title)) {
+      console.log(paint(line, ANSI.bold, ANSI.cyan));
+      continue;
+    }
+
+    if (line.includes(cycle)) {
+      console.log(muted(line));
+      continue;
+    }
+
+    if (line.includes(roster)) {
+      console.log(paint(line, ANSI.bold, ANSI.blue));
+      continue;
+    }
+
+    console.log(muted(line));
   }
 }
 
@@ -107,7 +140,7 @@ function renderWelcome(tools, settings, repoPath) {
     "",
     `Target repo: ${repoPath}`,
     `Output root: ${settings.output_root ?? ".ai-council/result"}`,
-    `Detected providers: ${tools.providers.map((provider) => `${provider.name}:${provider.available ? "ready" : "missing"}`).join(", ")}`,
+    `Detected providers: ${tools.providers.map((provider) => provider.name).join(", ") || "(none)"}`,
     "",
     "What you can expect:",
     "- a guided shell with recommended next steps and slash commands",
@@ -195,10 +228,24 @@ function renderHome(status, settings, repoPath) {
       `Latest run: ${status.latest_run}`,
       `Output root: ${status.output_root}`,
       `Status: ${status.status ?? "prepared"}`,
-      `${icon("next")} Recommended: ${accent(status.current_stage === "awaiting_approval" ? "Review and decide on the latest result" : "Inspect the latest result artifacts or launch a new run")}`,
+      `${icon("next")} Recommended: ${accent(
+        status.current_stage === "awaiting_clarification"
+          ? "Answer the clarification questions before proposal continues"
+          : status.current_stage === "awaiting_approval"
+            ? "Review and decide on the latest result"
+            : "Inspect the latest result artifacts or launch a new run"
+      )}`,
       `Why: ${status.recommended_action}`
     ]);
-    if (status.current_stage === "awaiting_approval") {
+    if (status.current_stage === "awaiting_clarification") {
+      panel(`${icon("next")} Next Steps`, [
+        "1. Answer clarification questions",
+        "2. Show latest artifacts",
+        "3. Start a new run",
+        "4. Configure this repo",
+        "5. Exit"
+      ]);
+    } else if (status.current_stage === "awaiting_approval") {
       panel(`${icon("next")} Next Steps`, [
         "1. Review latest result",
         "2. Approve result",
@@ -231,6 +278,28 @@ function renderHome(status, settings, repoPath) {
 
   console.log("");
   console.log(muted("Use numbers for guided actions or slash commands for speed: /help /home /status /configure /run /artifacts /cycle /exit"));
+}
+
+async function promptLatestClarification(rl, frameworkRoot, repoPath) {
+  const status = getStatus(frameworkRoot, repoPath);
+  const questions = Array.isArray(status.questions) ? status.questions : [];
+  if (questions.length === 0) {
+    panel(`${icon("warn")} Clarification`, [
+      "The latest run is waiting for clarification, but no questions were captured in the session payload.",
+      "Inspect work/input/clarification.json for details."
+    ]);
+    await waitForContinue(rl);
+    return status;
+  }
+
+  const answers = await promptClarificationAnswers(rl, questions);
+  if (answers.length === 0) {
+    return status;
+  }
+
+  return clarifyLatest(frameworkRoot, repoPath, {
+    clarification_answers: answers
+  });
 }
 
 async function chooseProviders(rl, choices, label, minimum = 1, fallbackIndexes = [0]) {
@@ -334,9 +403,10 @@ async function promptForAgentList(rl, label, councilAgents, minimum = 1, fallbac
 
 async function chooseProviderFromList(rl, choices, existingProvider = null, agentIndex = 0) {
   panel(`${icon("tools")} Council Agent ${agentIndex + 1} CLI`, choices.map((provider, index) =>
-    `${index + 1}. ${provider.name} (${provider.available ? "ready" : "missing"})`
+    `${index + 1}. ${provider.name}`
   ));
-  const fallbackIndex = Math.max(0, choices.findIndex((provider) => provider.name === existingProvider));
+  const preferredProvider = existingProvider || "copilot";
+  const fallbackIndex = Math.max(0, choices.findIndex((provider) => provider.name === preferredProvider));
   const defaultChoice = fallbackIndex >= 0 ? fallbackIndex + 1 : 1;
   const selected = await promptForNumberInRange(rl, `Agent ${agentIndex + 1} provider number`, 1, choices.length, defaultChoice);
   return choices[selected - 1] ?? choices[fallbackIndex] ?? choices[0];
@@ -348,7 +418,16 @@ async function chooseModelFromList(rl, provider, existingModel = null, agentInde
     return (await rl.question(`Agent ${agentIndex + 1} model${existingModel ? ` [${existingModel}]` : " (optional)"}> `)).trim() || existingModel || "";
   }
 
+  const modelSource = provider?.model_source === "cli"
+    ? "CLI-discovered"
+    : provider?.model_source === "cli+config"
+      ? "CLI-discovered + config fallback"
+      : provider?.model_source === "config"
+        ? "Config fallback"
+        : "Manual";
   panel(`${icon("tools")} ${provider.name} Models`, [
+    `Source: ${modelSource}`,
+    "",
     ...models.map((model, index) => `${index + 1}. ${model}`),
     `${models.length + 1}. Custom model`,
     `${models.length + 2}. No model`
@@ -405,6 +484,18 @@ async function chooseCouncilAgents(rl, councilAgents, label, minimum = 1, fallba
   return promptForAgentList(rl, label, councilAgents, minimum, fallbackIndexes);
 }
 
+function resolveStageFallbackIndexes(councilAgents, existingAssignments = []) {
+  const preferredIndexes = (Array.isArray(existingAssignments) ? existingAssignments : [])
+    .map((assignment) => councilAgents.findIndex((agent) => agent.id === assignment))
+    .filter((index) => index >= 0);
+
+  if (preferredIndexes.length > 0) {
+    return [...new Set(preferredIndexes)];
+  }
+
+  return councilAgents.map((_, index) => index);
+}
+
 async function configureWorkspace(repoPath, rl, tools, existingSettings = {}) {
   clearScreen();
   panel(`${icon("tools")} Configure Repo`, [
@@ -417,14 +508,16 @@ async function configureWorkspace(repoPath, rl, tools, existingSettings = {}) {
   const outputRoot = outputInput || existingSettings.output_root || ".ai-council/result";
 
   const choices = tools.providers.filter((provider) => provider.enabled);
-  panel(`${icon("tools")} Providers`, choices.map((provider, index) => `${index + 1}. ${provider.name} (${provider.available ? "ready" : "missing"})`));
+  panel(`${icon("tools")} Providers`, choices.map((provider, index) =>
+    `${index + 1}. ${provider.name}`
+  ));
 
   const councilAgents = await configureCouncilAgents(rl, choices, existingSettings.council_agents ?? []);
-  const proposal = await chooseCouncilAgents(rl, councilAgents, "Proposal", 2, [0, 1]);
-  const critique = await chooseCouncilAgents(rl, councilAgents, "Critique", 1, [0]);
-  const refinement = await chooseCouncilAgents(rl, councilAgents, "Refinement", 1, [0]);
-  const synthesis = await chooseCouncilAgents(rl, councilAgents, "Synthesis", 1, [0]);
-  const validation = await chooseCouncilAgents(rl, councilAgents, "Validation", 2, [0, 1]);
+  const proposal = await chooseCouncilAgents(rl, councilAgents, "Proposal", 1, resolveStageFallbackIndexes(councilAgents, existingSettings.stage_assignments?.proposal));
+  const critique = await chooseCouncilAgents(rl, councilAgents, "Critique", 1, resolveStageFallbackIndexes(councilAgents, existingSettings.stage_assignments?.critique));
+  const refinement = await chooseCouncilAgents(rl, councilAgents, "Refinement", 1, resolveStageFallbackIndexes(councilAgents, existingSettings.stage_assignments?.refinement));
+  const synthesis = await chooseCouncilAgents(rl, councilAgents, "Synthesis", 1, resolveStageFallbackIndexes(councilAgents, existingSettings.stage_assignments?.synthesis));
+  const validation = await chooseCouncilAgents(rl, councilAgents, "Validation", 1, resolveStageFallbackIndexes(councilAgents, existingSettings.stage_assignments?.validation));
   const autoLaunchInput = (await rl.question("Auto-launch provider commands when available? [Y/n] ")).trim().toLowerCase();
   const autoLaunch = autoLaunchInput === "" || autoLaunchInput === "y" || autoLaunchInput === "yes";
   const selectedProviders = [...new Set(councilAgents.map((agent) => agent.provider))];
@@ -443,7 +536,7 @@ async function configureWorkspace(repoPath, rl, tools, existingSettings = {}) {
 
   const settings = {
     first_run_complete: true,
-    default_provider: councilAgents[0]?.provider ?? "codex",
+    default_provider: councilAgents[0]?.provider ?? "copilot",
     default_participant: councilAgents[0] ?? null,
     auto_launch: autoLaunch,
     output_root: outputRoot,
@@ -517,11 +610,6 @@ async function promptRun(rl, frameworkRoot, repoPath, settings) {
     options.repo = (await rl.question("Repo path to review> ")).trim() || repoPath;
   }
 
-  const clarificationAnswers = await promptClarificationAnswers(rl, options, mode);
-  if (clarificationAnswers.length > 0) {
-    options.clarification_answers = clarificationAnswers;
-  }
-
   const summary = {
     mode,
     repo_path: repoPath,
@@ -571,7 +659,7 @@ async function promptRun(rl, frameworkRoot, repoPath, settings) {
       if (event.provider) progressState.current_provider = event.provider;
       if (event.completed_steps !== undefined) progressState.completed_steps = event.completed_steps;
       if (event.total_steps !== undefined) progressState.total_steps = event.total_steps;
-      if (event.type === "participant_waiting") {
+      if (event.type === "participant_waiting" || event.type === "clarification_waiting") {
         progressState.is_waiting = true;
         progressState.waiting_for = event.participant_label ?? event.provider ?? "";
         progressState.waiting_model = event.model ?? "";
@@ -582,7 +670,7 @@ async function promptRun(rl, frameworkRoot, repoPath, settings) {
             renderProgressView(progressState);
           }, 150);
         }
-      } else if (event.type === "participant_result" || event.type === "final_artifacts_created") {
+      } else if (event.type === "participant_result" || event.type === "clarification_result" || event.type === "final_artifacts_created") {
         progressState.is_waiting = false;
         progressState.waiting_for = "";
         progressState.waiting_model = "";
@@ -597,7 +685,20 @@ async function promptRun(rl, frameworkRoot, repoPath, settings) {
       renderProgressView(progressState);
     };
     try {
-      return { result: await runCouncil(frameworkRoot, repoPath, options), settings };
+      let result = await runCouncil(frameworkRoot, repoPath, options);
+      while (result?.status === "awaiting_clarification" && Array.isArray(result.questions) && result.questions.length > 0) {
+        const clarificationAnswers = await promptClarificationAnswers(rl, result.questions);
+        if (clarificationAnswers.length === 0) {
+          return { result, settings };
+        }
+
+        result = await clarifyLatest(frameworkRoot, repoPath, {
+          clarification_answers: clarificationAnswers,
+          on_progress: options.on_progress
+        });
+      }
+
+      return { result, settings };
     } finally {
       if (spinnerTimer) {
         clearInterval(spinnerTimer);
@@ -607,11 +708,14 @@ async function promptRun(rl, frameworkRoot, repoPath, settings) {
 }
 
 function renderRunResult(result) {
+  const stages = Array.isArray(result.deliberation_cycle)
+    ? result.deliberation_cycle.map((stage) => `${stage.stage}:${(stage.participant_labels ?? stage.participants).join("/")}`).join(" | ")
+    : "(pending clarification)";
   panel(`${icon("ok")} Run Prepared`, [
     `Mode: ${result.mode}`,
     `Run path: ${result.run_path}`,
     `Output root: ${result.output_root}`,
-    `Stages: ${result.deliberation_cycle.map((stage) => `${stage.stage}:${(stage.participant_labels ?? stage.participants).join("/")}`).join(" | ")}`,
+    `Stages: ${stages}`,
     `Next action: ${result.next_action}`
   ]);
 }
@@ -636,6 +740,46 @@ async function promptLatestApproval(rl, frameworkRoot, repoPath) {
   }
 
   if (decision === 1) {
+    const packaging = previewLatestStoryPackaging(frameworkRoot, repoPath);
+    if (packaging.is_large_result && packaging.can_split) {
+      panel(`${icon("tools")} Approval Packaging`, [
+        "This result is large enough that packaging it as implementation stories may make handoff easier.",
+        `Tasks: ${packaging.task_count}`,
+        `Acceptance criteria: ${packaging.acceptance_count}`,
+        `Approximate result words: ${packaging.word_count}`,
+        `Suggested split stories: ${packaging.suggested_story_count}`,
+        "",
+        "1. Create a single story",
+        "2. Split into multiple stories",
+        "3. Approve only",
+        "4. Decide later"
+      ]);
+      const packagingDecision = await promptForNumberInRange(rl, "Approval packaging", 1, 4, 1);
+      if (packagingDecision === 4) {
+        return { status: "pending_approval" };
+      }
+
+      if (packagingDecision === 1) {
+        const awfChoice = await promptForChoice(rl, "Generate AWF .wi folder now?", ["yes", "no"], "yes");
+        return decideLatest(frameworkRoot, repoPath, {
+          decision: "approve",
+          story_export_mode: "single",
+          create_awf: awfChoice === "yes"
+        });
+      }
+
+      if (packagingDecision === 2) {
+        return decideLatest(frameworkRoot, repoPath, {
+          decision: "approve",
+          story_export_mode: "split"
+        });
+      }
+
+      return decideLatest(frameworkRoot, repoPath, {
+        decision: "approve"
+      });
+    }
+
     const exportChoice = await promptForChoice(rl, "Export approved result to AWF now?", ["yes", "no"], "no");
     return decideLatest(frameworkRoot, repoPath, {
       decision: "approve",
@@ -650,28 +794,104 @@ async function promptLatestApproval(rl, frameworkRoot, repoPath) {
   });
 }
 
-async function promptClarificationAnswers(rl, options, mode) {
-  const preview = previewNormalizedInput(options, mode);
-  if (!Array.isArray(preview.clarification_questions) || preview.clarification_questions.length === 0) {
+async function askClarificationQuestion(rl, question, index, total) {
+  panel(`${icon("warn")} Clarification ${index + 1}/${total}`, [
+    question.prompt,
+    ...(question.observation ? [`Observation: ${question.observation}`] : []),
+    ...(question.answer_guidance ? [`Guidance: ${question.answer_guidance}`] : []),
+    "",
+    question.response_format === "list"
+      ? "Enter one item per line, then press Enter on a blank line to finish."
+      : "Provide the shortest answer that removes the planning blocker.",
+    "Type `exit` to stop and keep the current clarification state."
+  ]);
+
+  if (question.response_format === "list") {
+    const entries = [];
+    while (true) {
+      const entry = (await rl.question("Answer> ")).trim();
+      if (entry.toLowerCase() === "exit") {
+        return null;
+      }
+      if (!entry) {
+        break;
+      }
+      entries.push(entry);
+    }
+    return entries.join("; ").trim();
+  }
+
+  const answer = (await rl.question("Answer> ")).trim();
+  if (answer.toLowerCase() === "exit") {
+    return null;
+  }
+  return answer;
+}
+
+async function promptClarificationAnswers(rl, questions = []) {
+  if (!Array.isArray(questions) || questions.length === 0) {
     return [];
   }
 
   panel(`${icon("warn")} Clarification Needed`, [
-    "AI Council needs a little more context before the proposal phase starts.",
-    ...preview.clarification_questions.map((question, index) => `${index + 1}. ${question.prompt}`)
+    "AI Council found blocking questions before proposal can safely start.",
+    ...questions.map((question, index) => `${index + 1}. ${question.prompt}`)
   ]);
 
-  const answers = [];
-  for (const question of preview.clarification_questions) {
-    const answer = (await rl.question(`${question.prompt}> `)).trim();
-    answers.push({
-      id: question.id,
-      prompt: question.prompt,
-      answer
-    });
+  const answers = new Map();
+  for (const [index, question] of questions.entries()) {
+    const answer = await askClarificationQuestion(rl, question, index, questions.length);
+    if (answer === null) {
+      return [];
+    }
+
+    if (answer) {
+      answers.set(question.id, {
+        id: question.id,
+        prompt: question.prompt,
+        answer
+      });
+    }
   }
 
-  return answers;
+  while (answers.size > 0) {
+    panel("Review Clarification Answers", questions.map((question, index) =>
+      `${index + 1}. ${question.prompt} -> ${answers.get(question.id)?.answer ?? "(left blank)"}`
+    ));
+
+    const selection = (await rl.question("Enter a question number to revise, or press Enter to continue> ")).trim();
+    if (!selection) {
+      break;
+    }
+
+    if (selection.toLowerCase() === "exit") {
+      return [];
+    }
+
+    const questionIndex = Number.parseInt(selection, 10);
+    if (!Number.isInteger(questionIndex) || questionIndex < 1 || questionIndex > questions.length) {
+      console.log(warn(`Select a number between 1 and ${questions.length}.`));
+      continue;
+    }
+
+    const question = questions[questionIndex - 1];
+    const answer = await askClarificationQuestion(rl, question, questionIndex - 1, questions.length);
+    if (answer === null) {
+      return [];
+    }
+
+    if (answer) {
+      answers.set(question.id, {
+        id: question.id,
+        prompt: question.prompt,
+        answer
+      });
+    } else {
+      answers.delete(question.id);
+    }
+  }
+
+  return questions.map((question) => answers.get(question.id)).filter(Boolean);
 }
 
 function renderRunSummary(summary) {
@@ -734,6 +954,14 @@ function formatProgressEvent(event) {
       return `Normalized ${event.source_type} input for "${event.title}"`;
     case "review_evidence_created":
       return `Indexed ${event.file_count} files for review`;
+    case "clarification_started":
+      return `Clarification stage prepared with ${event.participant_label ?? event.provider ?? "Axiom"}`;
+    case "clarification_waiting":
+      return `${event.participant_label ?? event.provider ?? "Axiom"} reviewing ambiguity before proposal`;
+    case "clarification_result":
+      return event.status === "needs_clarification"
+        ? `Clarification found ${event.blocking_question_count ?? event.question_count ?? 0} blocking question(s)`
+        : "Clarification found the request ready for proposal";
     case "stage_started":
       return `Stage ${event.stage} started with ${event.participant_count} participant(s)`;
     case "startup_begin":
@@ -920,6 +1148,47 @@ export async function startShell(frameworkRoot, repoPath) {
           continue;
         }
         if (response === "8" || response.toLowerCase() === "exit") {
+          return { status: "exited" };
+        }
+        continue;
+      }
+
+      if (status.current_stage === "awaiting_clarification") {
+        if (response === "1") {
+          const clarified = await promptLatestClarification(rl, frameworkRoot, repoPath);
+          if (clarified?.status === "pending_approval") {
+            await promptLatestApproval(rl, frameworkRoot, repoPath);
+          }
+          continue;
+        }
+        if (response === "2") {
+          clearScreen();
+          renderArtifacts(status);
+          await waitForContinue(rl);
+          continue;
+        }
+        if (response === "3") {
+          const action = await promptRun(rl, frameworkRoot, repoPath, settings);
+          if (action.cancelled) {
+            continue;
+          }
+          if (action.reconfigure) {
+            settings = await configureWorkspace(repoPath, rl, tools, settings);
+            continue;
+          }
+          clearScreen();
+          renderRunResult(action.result);
+          if (action.result?.status === "pending_approval") {
+            await promptLatestApproval(rl, frameworkRoot, repoPath);
+          }
+          await waitForContinue(rl);
+          continue;
+        }
+        if (response === "4") {
+          settings = await configureWorkspace(repoPath, rl, tools, settings);
+          continue;
+        }
+        if (response === "5" || response.toLowerCase() === "exit") {
           return { status: "exited" };
         }
         continue;

@@ -46,7 +46,7 @@ Each run now separates clean deliverables from process files:
 - `result/` contains only the final result artifacts
 - `work/` contains prompts, logs, session files, evidence packs, and other intermediate material
 
-The CLI is now repo-targeted. Once installed, you can run it from any folder and it will store configuration in that target repo’s `.ai-council/` directory.
+The CLI is repo-targeted and now auto-resolves the repository root. You can run it from any folder inside a repo, and it will store configuration in that target repo's `.ai-council/` directory.
 
 ## Install And Start
 
@@ -66,16 +66,20 @@ ai-council run --repo C:\some-repo --mode plan --prompt "Plan a new council CLI"
 ai-council resume --repo C:\some-repo
 ```
 
-The guided shell now starts with a banner and overview, waits for an Enter keypress, and on first run asks you to configure council agents and stage participants for proposal, critique, refinement, synthesis, and validation so multiple agents can deliberate on the same ticket before the final result is produced.
+If you point `--repo` at a nested folder inside a repository, AI Council now resolves that path back to the repo root before it loads settings, writes outputs, or launches provider CLIs.
+
+The guided shell now starts with a banner and overview, waits for an Enter keypress, and on first run asks you to configure council agents and stage participants for proposal, critique, refinement, synthesis, and validation so multiple agents can deliberate on the same ticket before the final result is produced. By default, each stage now uses all configured council agents unless you narrow a stage explicitly.
 Each council agent is a `CLI + optional model` seat. That means you can:
 
 - use the same CLI twice with different models and treat them as two distinct council agents
 - use the same CLI and same model twice when you still want two separate council seats for deliberation
 
 It also provides an AWF-style single-screen home, guided next steps, slash commands, and paged views so you can move through the console without losing context to terminal scroll.
-During repo configuration you can also save optional provider startup/trust commands so AI CLIs that require workspace authorization can be preflighted automatically before launch.
+During repo configuration you can also save optional provider startup/trust commands so AI CLIs that require workspace authorization can be preflighted automatically before launch. Provider runs now execute against the target repo root and keep `work/` available as an additional artifact directory, which fixes review-time source access issues in nested repos.
+Before proposal starts, AI Council now runs a clarification stage. When launch is enabled, that stage can use the configured AI CLI to review the request semantically and ask only the smallest blocking questions needed before planning. The guided shell then runs those questions interactively and lets you revise answers before the council continues.
 When starting a new run from the shell, you now get a summary screen with the option to start, change configuration, or cancel, and the shell shows compact live progress so you can tell whether stages are advancing or returning errors.
 Provider execution is now bounded by per-provider timeouts, and the work folder records provider session state so future CLI-specific continue/resume commands can be supported cleanly.
+If a configured AI CLI is unavailable, AI Council now stops before deliberation instead of silently dropping that participant. Review mode also stops immediately when required source materials cannot be accessed.
 
 More docs:
 

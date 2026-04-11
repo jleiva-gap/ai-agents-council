@@ -1,10 +1,42 @@
+import fs from "node:fs";
 import path from "node:path";
 
-import { listFilesRecursive, writeJson, writeText } from "../utils/fs.js";
+import { listFilesRecursive, pathExists, writeJson, writeText } from "../utils/fs.js";
+
+function reviewAccessError(message, repoPath) {
+  return new Error(`Unable to access required source materials for comprehensive architectural review. ${message}: ${repoPath}`);
+}
 
 export function buildReviewEvidence(runPath, repoPath) {
   const resolvedRepo = path.resolve(repoPath);
-  const files = listFilesRecursive(resolvedRepo).map((filePath) => path.relative(resolvedRepo, filePath).replace(/\\/g, "/"));
+  if (!pathExists(resolvedRepo)) {
+    throw reviewAccessError("Review target does not exist", resolvedRepo);
+  }
+
+  let repoStats;
+  try {
+    repoStats = fs.statSync(resolvedRepo);
+  } catch {
+    throw reviewAccessError("Review target could not be inspected", resolvedRepo);
+  }
+
+  if (!repoStats.isDirectory()) {
+    throw reviewAccessError("Review target is not a directory", resolvedRepo);
+  }
+
+  let files;
+  try {
+    files = listFilesRecursive(resolvedRepo)
+      .map((filePath) => path.relative(resolvedRepo, filePath).replace(/\\/g, "/"))
+      .filter((filePath) => !/(^|\/)\.ai-council(\/|$)/.test(filePath) && !/(^|\/)\.runs(\/|$)/.test(filePath));
+  } catch {
+    throw reviewAccessError("Review target could not be indexed", resolvedRepo);
+  }
+
+  if (files.length === 0) {
+    throw reviewAccessError("No readable files were found under the review target", resolvedRepo);
+  }
+
   const docs = files.filter((filePath) => /(^|\/)(readme|docs?)/i.test(filePath));
   const tests = files.filter((filePath) => /(test|spec)\./i.test(filePath) || /(^|\/)(tests?|specs?)(\/|$)/i.test(filePath));
   const evidence = {

@@ -6,6 +6,7 @@ import { installFramework, uninstallFramework, upgradeFramework } from "../orche
 import { decideLatest, exportLatestToAwf, getStatus, resumeLatest, runCouncil, toolingStatus } from "../core/workflow.js";
 import { loadRepoSettings } from "../core/config.js";
 import { getBooleanOption, getOption, parseCliArgs, printHelp } from "../utils/cli.js";
+import { resolveRepoRoot } from "../utils/fs.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const defaultFrameworkRoot = path.resolve(path.dirname(currentFile), "..", "..");
@@ -17,7 +18,7 @@ function printJson(value) {
 export async function main(argv) {
   const { command, options } = parseCliArgs(argv);
   const frameworkRoot = path.resolve(getOption(options, "root") ?? defaultFrameworkRoot);
-  const repoPath = path.resolve(getOption(options, "repo") ?? getOption(options, "path") ?? process.cwd());
+  const repoPath = resolveRepoRoot(getOption(options, "repo") ?? getOption(options, "path") ?? process.cwd());
   const repoSettings = loadRepoSettings(repoPath);
   const resolvedLaunch = Object.hasOwn(options, "launch")
     ? getBooleanOption(options, "launch")
@@ -64,7 +65,8 @@ export async function main(argv) {
           prompt: getOption(options, "prompt"),
           reason: getOption(options, "reason"),
           notes: getOption(options, "notes"),
-          create_awf: getBooleanOption(options, "create-awf")
+          create_awf: getBooleanOption(options, "create-awf"),
+          story_export_mode: getOption(options, "story-export-mode")
         }));
         return;
       case "export-awf":

@@ -52,4 +52,6 @@ ai-council tooling-status --repo C:\repo
 ai-council shell --repo C:\repo
 ```
 
-For normal interactive use, prefer `ai-council shell --repo C:\repo`. The other commands remain available for scripting and direct automation.
+`tooling-status` now probes each configured AI CLI, validates the non-interactive launch shape against the CLI's own help output, and reports whether each model list came from CLI discovery or config fallback.
+
+For normal interactive use, prefer `ai-council shell --repo C:\repo`. You can also pass any nested path inside the repo and AI Council will resolve the repo root automatically. The other commands remain available for scripting and direct automation.

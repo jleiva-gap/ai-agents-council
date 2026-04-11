@@ -84,3 +84,45 @@ test("repo settings preserve duplicate council agents using the same provider an
     fs.rmSync(repoPath, { recursive: true, force: true });
   }
 });
+
+test("repo settings default empty stage assignments to all configured council agents", () => {
+  const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-stage-defaults-"));
+
+  try {
+    saveRepoSettings(repoPath, {
+      first_run_complete: true,
+      default_provider: "copilot",
+      default_participant: {
+        id: "agent-1",
+        provider: "copilot",
+        model: "gpt-5",
+        label: "Copilot Primary"
+      },
+      auto_launch: true,
+      output_root: ".ai-council/result",
+      council_agents: [
+        { id: "agent-1", provider: "copilot", model: "gpt-5", label: "Copilot Primary" },
+        { id: "agent-2", provider: "gemini", model: "gemini-2.5-pro", label: "Gemini Challenger" },
+        { id: "agent-3", provider: "claude", model: "sonnet", label: "Claude Reviewer" }
+      ],
+      stage_assignments: {
+        proposal: [],
+        critique: [],
+        refinement: [],
+        synthesis: [],
+        validation: []
+      },
+      provider_overrides: {}
+    });
+
+    const settings = loadRepoSettings(repoPath);
+    const expected = ["agent-1", "agent-2", "agent-3"];
+    assert.deepEqual(settings.stage_assignments.proposal, expected);
+    assert.deepEqual(settings.stage_assignments.critique, expected);
+    assert.deepEqual(settings.stage_assignments.refinement, expected);
+    assert.deepEqual(settings.stage_assignments.synthesis, expected);
+    assert.deepEqual(settings.stage_assignments.validation, expected);
+  } finally {
+    fs.rmSync(repoPath, { recursive: true, force: true });
+  }
+});

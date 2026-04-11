@@ -5,75 +5,316 @@ import fs from "node:fs";
 import { commandExists, writeJson } from "../utils/fs.js";
 import { getCouncilIdentity } from "../core/identity.js";
 
-function probeProviderCommand(command, providerName) {
+const PROVIDER_PROFILES = {
+  codex: {
+    help_args: ["exec", "--help"],
+    required_help_tokens: ["--model", "--skip-git-repo-check", "--add-dir"],
+    required_launch_tokens: [["exec"]],
+    compatibility_note: "Expected Codex exec support with --model, --skip-git-repo-check, and --add-dir.",
+    prompt_modes: ["stdin", "arg"]
+  },
+  claude: {
+    help_args: ["--help"],
+    required_help_tokens: ["--permission-mode", "-p, --print", "--model", "--add-dir"],
+    required_launch_tokens: [["-p", "--print"], ["--permission-mode"]],
+    compatibility_note: "Expected Claude Code non-interactive flags (-p/--print, --permission-mode, --model, --add-dir).",
+    prompt_modes: ["stdin", "arg"]
+  },
+  gemini: {
+    help_args: ["--help"],
+    required_help_tokens: ["-p, --prompt", "--approval-mode", "--include-directories", "-m, --model"],
+    required_launch_tokens: [["-p", "--prompt"], ["--approval-mode"]],
+    compatibility_note: "Expected Gemini CLI headless prompt flags (-p/--prompt, --approval-mode, --include-directories, --model).",
+    prompt_modes: ["stdin", "arg"]
+  },
+  copilot: {
+    help_args: ["--help"],
+    required_help_tokens: ["-p, --prompt", "--allow-all-tools", "--model", "--add-dir", "--no-ask-user"],
+    required_launch_tokens: [["-p", "--prompt"], ["--allow-all-tools"]],
+    compatibility_note: "Expected Copilot CLI prompt and permission flags (-p/--prompt, --allow-all-tools, --model, --add-dir, --no-ask-user).",
+    prompt_modes: ["arg"]
+  }
+};
+
+function uniqueStrings(values = []) {
+  return [...new Set(values.map((value) => String(value ?? "").trim()).filter(Boolean))];
+}
+
+function resolveCommandCandidates(commandName) {
+  const normalizedCommand = String(commandName ?? "").trim();
+  if (!normalizedCommand) {
+    return [];
+  }
+
+  const candidates = [];
+  const hasExplicitPath = normalizedCommand.includes(path.sep) || (process.platform === "win32" && normalizedCommand.includes("/"));
+  const knownExtensions = process.platform === "win32"
+    ? String(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+      .split(";")
+      .map((value) => value.trim())
+      .filter(Boolean)
+    : [""];
+
+  if (path.isAbsolute(normalizedCommand) || hasExplicitPath) {
+    candidates.push(normalizedCommand);
+    if (process.platform === "win32" && !path.extname(normalizedCommand)) {
+      for (const extension of knownExtensions) {
+        candidates.push(`${normalizedCommand}${extension}`);
+      }
+      candidates.push(`${normalizedCommand}.ps1`);
+    }
+    return uniqueStrings(candidates).filter((candidate) => fs.existsSync(candidate));
+  }
+
+  for (const entry of String(process.env.PATH ?? "").split(path.delimiter)) {
+    const trimmedEntry = entry.trim().replace(/^"+|"+$/g, "");
+    if (!trimmedEntry) {
+      continue;
+    }
+
+    candidates.push(path.join(trimmedEntry, normalizedCommand));
+    if (process.platform === "win32" && !path.extname(normalizedCommand)) {
+      for (const extension of knownExtensions) {
+        candidates.push(path.join(trimmedEntry, `${normalizedCommand}${extension}`));
+      }
+      candidates.push(path.join(trimmedEntry, `${normalizedCommand}.ps1`));
+    }
+  }
+
+  return uniqueStrings(candidates).filter((candidate) => fs.existsSync(candidate));
+}
+
+function quoteForCmd(value) {
+  const text = String(value ?? "");
+  if (!text) {
+    return "\"\"";
+  }
+
+  if (!/[ \t"&^<>|()]/.test(text)) {
+    return text;
+  }
+
+  return `"${text.replace(/"/g, "\"\"")}"`;
+}
+
+export function resolveProcessInvocation(command, args = []) {
+  const normalizedArgs = normalizeCommandTokens(args);
+  if (process.platform !== "win32") {
+    return {
+      executable: String(command ?? "").trim(),
+      args: normalizedArgs
+    };
+  }
+
+  const candidates = resolveCommandCandidates(command);
+  const preference = [".exe", ".cmd", ".bat", ".com", ".ps1", ""];
+  const resolvedCommand = candidates.sort((left, right) => {
+    const leftRank = preference.indexOf(path.extname(left).toLowerCase());
+    const rightRank = preference.indexOf(path.extname(right).toLowerCase());
+    return (leftRank === -1 ? preference.length : leftRank) - (rightRank === -1 ? preference.length : rightRank);
+  })[0] ?? String(command ?? "").trim();
+  const extension = path.extname(resolvedCommand).toLowerCase();
+
+  if (extension === ".ps1") {
+    return {
+      executable: commandExists("pwsh") ? "pwsh" : "powershell",
+      args: ["-NoProfile", "-File", resolvedCommand, ...normalizedArgs]
+    };
+  }
+
+  if (extension === ".cmd" || extension === ".bat") {
+    return {
+      executable: process.env.ComSpec ?? "cmd.exe",
+      args: ["/d", "/s", "/c", [quoteForCmd(resolvedCommand), ...normalizedArgs.map((value) => quoteForCmd(value))].join(" ")]
+    };
+  }
+
+  return {
+    executable: resolvedCommand,
+    args: normalizedArgs
+  };
+}
+
+function normalizeCommandTokens(commandValue) {
+  return Array.isArray(commandValue)
+    ? commandValue.map((entry) => String(entry ?? "").trim()).filter(Boolean)
+    : [];
+}
+
+function commandIncludesAny(commandTokens, candidates = []) {
+  return candidates.some((candidate) => commandTokens.includes(candidate));
+}
+
+function formatMissingTokenGroup(group = []) {
+  return group.map((token) => `\`${token}\``).join(" or ");
+}
+
+function mergeModelCatalogs(discoveredModels = [], fallbackModels = []) {
+  const discovered = uniqueStrings(discoveredModels);
+  const fallback = uniqueStrings(fallbackModels);
+  if (discovered.length === 0) {
+    return {
+      models: fallback,
+      cli_discovered_models: [],
+      model_source: fallback.length > 0 ? "config" : "none"
+    };
+  }
+
+  return {
+    models: uniqueStrings([...discovered, ...fallback]),
+    cli_discovered_models: discovered,
+    model_source: fallback.length > 0 ? "cli+config" : "cli"
+  };
+}
+
+function discoverProviderModels(providerName, helpText = "", fallbackModels = []) {
+  if (providerName === "claude") {
+    const modelLine = String(helpText ?? "")
+      .split(/\r?\n/)
+      .find((line) => line.includes("--model <model>"));
+    const discovered = Array.from(String(modelLine ?? "").matchAll(/'([^']+)'/g))
+      .map((match) => match[1])
+      .filter((value) => /^(sonnet|opus|claude-)/i.test(value));
+    return mergeModelCatalogs(discovered, fallbackModels);
+  }
+
+  return mergeModelCatalogs([], fallbackModels);
+}
+
+function validatePromptTransport(providerName, promptTransport, launchTokens) {
+  const profile = PROVIDER_PROFILES[providerName];
+  if (!profile) {
+    return { valid: true, note: null };
+  }
+
+  if (profile.prompt_modes && !profile.prompt_modes.includes(promptTransport)) {
+    return {
+      valid: false,
+      note: `${providerName} does not support prompt transport "${promptTransport}". Supported modes: ${profile.prompt_modes.join(", ")}.`
+    };
+  }
+
+  if (promptTransport === "arg" && !commandIncludesAny(launchTokens, ["{{PROMPT_TEXT}}", "{{PROMPT_FILE}}"])) {
+    return {
+      valid: false,
+      note: `Prompt transport "${promptTransport}" requires \`{{PROMPT_TEXT}}\` or \`{{PROMPT_FILE}}\` in the launch command.`
+    };
+  }
+
+  return { valid: true, note: null };
+}
+
+export function analyzeProviderHelp(providerName, helpText = "", configuredLaunchCommand = [], fallbackModels = [], promptTransport = "file") {
+  const profile = PROVIDER_PROFILES[providerName];
+  const normalizedHelpText = String(helpText ?? "");
+  const lowercaseHelp = normalizedHelpText.toLowerCase();
+  const launchTokens = normalizeCommandTokens(configuredLaunchCommand);
+  const missingHelpTokens = (profile?.required_help_tokens ?? []).filter((token) => !lowercaseHelp.includes(String(token).toLowerCase()));
+  const missingLaunchGroups = (profile?.required_launch_tokens ?? []).filter((group) => !commandIncludesAny(launchTokens, group));
+  const promptValidation = validatePromptTransport(providerName, promptTransport, launchTokens);
+  const modelCatalog = discoverProviderModels(providerName, normalizedHelpText, fallbackModels);
+  const compatible = missingHelpTokens.length === 0;
+  const launchCommandValid = missingLaunchGroups.length === 0 && promptValidation.valid === true;
+  const issues = [];
+
+  if (missingHelpTokens.length > 0) {
+    issues.push(`Missing help tokens: ${missingHelpTokens.map((token) => `\`${token}\``).join(", ")}`);
+  }
+  if (missingLaunchGroups.length > 0) {
+    issues.push(`Launch command is missing ${missingLaunchGroups.map((group) => formatMissingTokenGroup(group)).join(", ")}`);
+  }
+  if (promptValidation.note) {
+    issues.push(promptValidation.note);
+  }
+
+  return {
+    compatible,
+    compatibility_note: issues.length > 0
+      ? `${profile?.compatibility_note ?? "Provider CLI did not expose the expected non-interactive flags."} ${issues.join(" ")}`
+      : profile?.compatibility_note ?? null,
+    launch_command_valid: launchCommandValid,
+    launch_command_note: issues.filter((issue) => issue.startsWith("Launch command") || issue.includes("Prompt transport")).join(" ").trim() || null,
+    models: modelCatalog.models,
+    cli_discovered_models: modelCatalog.cli_discovered_models,
+    model_source: modelCatalog.model_source
+  };
+}
+
+function runCommandCapture(command, args = []) {
+  const invocation = resolveProcessInvocation(command, args);
+  return spawnSync(invocation.executable, invocation.args, {
+    encoding: "utf8",
+    timeout: 5000
+  });
+}
+
+function probeProviderCommand(command, providerName, providerConfig = {}) {
   if (!commandExists(command)) {
     return {
       installed: false,
       compatible: false,
-      compatibility_note: "Command not found on PATH."
+      compatibility_note: "Command not found on PATH.",
+      launch_command_valid: false,
+      launch_command_note: "Command not found on PATH.",
+      models: uniqueStrings(providerConfig.models),
+      cli_discovered_models: [],
+      model_source: Array.isArray(providerConfig.models) && providerConfig.models.length > 0 ? "config" : "none"
     };
   }
 
-  const result = spawnSync(command, ["--help"], {
-    encoding: "utf8",
-    timeout: 5000
-  });
-  const helpText = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.toLowerCase();
+  const profile = PROVIDER_PROFILES[providerName] ?? { help_args: ["--help"] };
+  const helpResult = runCommandCapture(command, profile.help_args ?? ["--help"]);
+  const helpText = `${helpResult.stdout ?? ""}\n${helpResult.stderr ?? ""}`.trim();
+  const analysis = analyzeProviderHelp(
+    providerName,
+    helpText,
+    providerConfig.launch_command ?? [],
+    providerConfig.models ?? [],
+    providerConfig.prompt_transport ?? "file"
+  );
 
-  switch (providerName) {
-    case "claude":
-      return {
-        installed: true,
-        compatible: helpText.includes("--permission-mode") && (helpText.includes("-p, --print") || helpText.includes("--print")),
-        compatibility_note: "Expected Claude Code non-interactive flags (-p/--print, --permission-mode)."
-      };
-    case "gemini":
-      return {
-        installed: true,
-        compatible: helpText.includes("-p, --prompt") && helpText.includes("--approval-mode"),
-        compatibility_note: "Expected Gemini CLI headless prompt flags (-p/--prompt, --approval-mode)."
-      };
-    case "copilot":
-      return {
-        installed: true,
-        compatible: helpText.includes("-p, --prompt") && helpText.includes("--allow-all-tools"),
-        compatibility_note: "Expected Copilot CLI prompt and permission flags (-p/--prompt, --allow-all-tools)."
-      };
-    case "codex":
-      return {
-        installed: true,
-        compatible: helpText.includes(" run") || helpText.includes("--prompt-file"),
-        compatibility_note: "Expected a Codex CLI that supports non-interactive run/prompt-file execution."
-      };
-    default:
-      return {
-        installed: true,
-        compatible: true,
-        compatibility_note: null
-      };
-  }
+  return {
+    installed: true,
+    compatible: analysis.compatible,
+    compatibility_note: analysis.compatibility_note,
+    launch_command_valid: analysis.launch_command_valid,
+    launch_command_note: analysis.launch_command_note,
+    models: analysis.models,
+    cli_discovered_models: analysis.cli_discovered_models,
+    model_source: analysis.model_source
+  };
 }
 
 export function detectProviders(providerConfig = {}, providerOverrides = {}) {
   const providers = providerConfig.providers ?? {};
   return Object.entries(providers).map(([name, config]) => {
     const resolvedCommand = providerOverrides?.[name]?.command ?? config.command;
-    const probe = probeProviderCommand(resolvedCommand, name);
+    const resolvedLaunchCommand = providerOverrides?.[name]?.launch_command ?? config.launch_command ?? [];
+    const resolvedPromptTransport = providerOverrides?.[name]?.prompt_transport ?? config.prompt_transport ?? "file";
+    const probe = probeProviderCommand(resolvedCommand, name, {
+      ...config,
+      launch_command: resolvedLaunchCommand,
+      prompt_transport: resolvedPromptTransport
+    });
     return {
       name,
       enabled: config.enabled === true,
       command: resolvedCommand,
-      models: Array.isArray(config.models) ? config.models : [],
+      models: probe.models,
+      cli_discovered_models: probe.cli_discovered_models,
+      model_source: probe.model_source,
       installed: probe.installed,
       compatible: probe.compatible,
-      available: config.enabled === true && probe.installed === true && probe.compatible === true,
+      available: config.enabled === true && probe.installed === true && probe.compatible === true && probe.launch_command_valid !== false,
       compatibility_note: probe.compatibility_note,
-      launch_command: providerOverrides?.[name]?.launch_command ?? config.launch_command ?? [],
+      launch_command_valid: probe.launch_command_valid,
+      launch_command_note: probe.launch_command_note,
+      launch_command: resolvedLaunchCommand,
       continue_command: providerOverrides?.[name]?.continue_command ?? config.continue_command ?? null,
       startup_command: providerOverrides?.[name]?.startup_command ?? config.startup_command ?? null,
       timeout_ms: providerOverrides?.[name]?.timeout_ms ?? config.timeout_ms ?? 120000,
       session_mode: providerOverrides?.[name]?.session_mode ?? config.session_mode ?? "fresh",
-      prompt_transport: providerOverrides?.[name]?.prompt_transport ?? config.prompt_transport ?? "file"
+      prompt_transport: resolvedPromptTransport
     };
   });
 }
@@ -169,12 +410,31 @@ export function writeCouncilPlan(runPath, assignments) {
 }
 
 function spawnProcessAsync(executable, args, options = {}) {
+  const invocation = resolveProcessInvocation(executable, args);
   return new Promise((resolve) => {
-    const child = spawn(executable, args, {
-      cwd: options.cwd,
-      env: options.env,
-      stdio: ["pipe", "pipe", "pipe"]
-    });
+    let child;
+    try {
+      child = spawn(invocation.executable, invocation.args, {
+        cwd: options.cwd,
+        env: options.env,
+        stdio: ["pipe", "pipe", "pipe"]
+      });
+    } catch (error) {
+      const syncResult = spawnSync(invocation.executable, invocation.args, {
+        cwd: options.cwd,
+        env: options.env,
+        encoding: "utf8",
+        input: options.input,
+        timeout: options.timeout
+      });
+      resolve({
+        status: syncResult.status ?? 1,
+        stdout: syncResult.stdout ?? "",
+        stderr: syncResult.stderr || error.message,
+        timed_out: syncResult.signal === "SIGTERM" || syncResult.error?.code === "ETIMEDOUT"
+      });
+      return;
+    }
 
     let stdout = "";
     let stderr = "";
@@ -232,7 +492,7 @@ function spawnProcessAsync(executable, args, options = {}) {
   });
 }
 
-export async function maybeLaunchPrompt(promptFile, outputFile, workingDirectory, provider, launch = false, sessionState = null) {
+export async function maybeLaunchPrompt(promptFile, outputFile, workingDirectory, provider, launch = false, sessionState = null, artifactDirectory = null) {
   const promptText = fs.readFileSync(promptFile, "utf8");
   const commandTemplate = provider.session_mode === "session" && sessionState?.active && provider.continue_command
     ? provider.continue_command
@@ -241,6 +501,7 @@ export async function maybeLaunchPrompt(promptFile, outputFile, workingDirectory
     "{{PROMPT_FILE}}": promptFile,
     "{{OUTPUT_FILE}}": outputFile,
     "{{WORKING_DIRECTORY}}": workingDirectory,
+    "{{ARTIFACT_DIRECTORY}}": artifactDirectory ?? workingDirectory,
     "{{SESSION_FILE}}": sessionState?.session_file ?? "",
     "{{PROMPT_TEXT}}": promptText,
     "{{MODEL}}": provider.model ?? ""
@@ -249,6 +510,7 @@ export async function maybeLaunchPrompt(promptFile, outputFile, workingDirectory
     "{{PROMPT_FILE}}": promptFile,
     "{{OUTPUT_FILE}}": outputFile,
     "{{WORKING_DIRECTORY}}": workingDirectory,
+    "{{ARTIFACT_DIRECTORY}}": artifactDirectory ?? workingDirectory,
     "{{SESSION_FILE}}": sessionState?.session_file ?? "",
     "{{PROMPT_TEXT}}": "<prompt>",
     "{{MODEL}}": provider.model ?? ""
@@ -256,7 +518,7 @@ export async function maybeLaunchPrompt(promptFile, outputFile, workingDirectory
 
   if (provider.model) {
     const hasModelFlag = command.includes("--model");
-    if (!hasModelFlag && provider.command !== "codex") {
+    if (!hasModelFlag) {
       command = [...command, "--model", provider.model];
       commandPreview = [...commandPreview, "--model", provider.model];
     }

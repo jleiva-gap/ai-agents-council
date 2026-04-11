@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { pathExists, readJson, writeJson } from "../utils/fs.js";
+import { pathExists, readJson, resolveRepoRoot, writeJson } from "../utils/fs.js";
 
 function normalizeAgentProfile(agent, index = 0) {
   if (!agent || typeof agent !== "object") {
@@ -71,6 +71,10 @@ function normalizeStageAssignments(settings) {
       }
     }
 
+    if (normalized.length === 0 && councilAgents.length > 0) {
+      return councilAgents.map((agent) => agent.id);
+    }
+
     if (normalized.length === 0 && fallbackProvider) {
       const fallbackId = `fallback-${stageName}`;
       if (!councilAgentIds.has(fallbackId)) {
@@ -102,7 +106,7 @@ function normalizeStageAssignments(settings) {
 }
 
 export function repoSettingsPath(repoPath) {
-  return path.join(repoPath, ".ai-council", "settings.json");
+  return path.join(resolveRepoRoot(repoPath), ".ai-council", "settings.json");
 }
 
 export function loadRepoSettings(repoPath) {
@@ -150,10 +154,11 @@ export function hasCompletedFirstRun(repoPath) {
 }
 
 export function loadConfig(frameworkRoot, repoPath = frameworkRoot) {
+  const resolvedRepoPath = resolveRepoRoot(repoPath);
   const app = readJson(path.join(frameworkRoot, "config", "app.settings.json"), {});
   const providers = readJson(path.join(frameworkRoot, "config", "providers.json"), {});
   const mcp = readJson(path.join(frameworkRoot, "config", "mcp.settings.json"), {});
-  const user = loadRepoSettings(repoPath);
+  const user = loadRepoSettings(resolvedRepoPath);
   const workflows = {
     plan: readJson(path.join(frameworkRoot, "config", "workflows", "plan.json"), {}),
     design: readJson(path.join(frameworkRoot, "config", "workflows", "design.json"), {}),

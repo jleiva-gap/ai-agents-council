@@ -66,7 +66,7 @@ Common options:
   --prompt <text>       Freeform prompt input
   --prompt-file <path>  Freeform prompt file input
   --jira-url <url>      Jira URL to normalize into a local ticket artifact
-  --repo <path>         Target repository path for review mode
+  --repo <path>         Target repository path, or any path inside that repo
   --install-root <path> Shared framework install location
   --bin-dir <path>      Wrapper output directory for global commands
   --output-root <path>  Root folder for generated run results
@@ -75,5 +75,6 @@ Common options:
   --launch              Preview or launch provider commands when configured
   --decision <name>     approve | request_changes | reject
   --create-awf          Export .wi AWF artifacts immediately after approval
+  --story-export-mode   none | single | split
 `);
 }

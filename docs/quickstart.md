@@ -8,12 +8,17 @@ The preferred way to use AI Council is the guided shell. The direct commands bel
 ai-council shell --repo C:\repo
 ```
 
+You can also point `--repo` at a nested folder inside that repository. AI Council will resolve it to the repo root automatically.
+
 On first run, the shell will:
 
 - show the banner and overview
 - wait for an Enter keypress
 - ask you to assign providers to `proposal`, `critique`, `refinement`, `synthesis`, and `validation`
+- default each stage to all configured council agents unless you narrow it
 - save those assignments for future runs
+
+When a request is still ambiguous, the shell now lets the clarification stage run before proposal. If the clarification stage finds blocking questions, the shell asks them one by one, then lets you review and revise the captured answers before the council continues.
 
 If the latest run is still waiting for a decision, re-entering the shell will reopen that pending approval flow so you can approve, reject, or request changes.
 
@@ -28,6 +33,8 @@ ai-council run --repo C:\repo --mode plan --prompt "Plan a new council CLI"
 ```powershell
 ai-council run --repo C:\repo --mode review --prompt "Review this implementation"
 ```
+
+Review runs now fail fast if the target repo cannot be indexed or the required source materials are inaccessible, instead of continuing with a misleading partial result.
 
 ## Outputs
 
