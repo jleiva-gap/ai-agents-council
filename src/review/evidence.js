@@ -8,6 +8,7 @@ function reviewAccessError(message, repoPath) {
 }
 
 export function buildReviewEvidence(runPath, repoPath) {
+  const fileIndexLimit = 500;
   const resolvedRepo = path.resolve(repoPath);
   if (!pathExists(resolvedRepo)) {
     throw reviewAccessError("Review target does not exist", resolvedRepo);
@@ -39,12 +40,18 @@ export function buildReviewEvidence(runPath, repoPath) {
 
   const docs = files.filter((filePath) => /(^|\/)(readme|docs?)/i.test(filePath));
   const tests = files.filter((filePath) => /(test|spec)\./i.test(filePath) || /(^|\/)(tests?|specs?)(\/|$)/i.test(filePath));
+  const truncated = files.length > fileIndexLimit;
   const evidence = {
     repo_path: resolvedRepo,
     file_count: files.length,
     doc_count: docs.length,
     test_count: tests.length,
-    files: files.slice(0, 500),
+    files: files.slice(0, fileIndexLimit),
+    file_index_limit: fileIndexLimit,
+    file_index_truncated: truncated,
+    file_index_warning: truncated
+      ? `The indexed file list was truncated to the first ${fileIndexLimit} files out of ${files.length}.`
+      : null,
     focus_areas: [
       "core implementation paths",
       "tests and verification coverage",
@@ -53,7 +60,12 @@ export function buildReviewEvidence(runPath, repoPath) {
   };
 
   writeJson(path.join(runPath, "repo", "scope.json"), { repo_path: resolvedRepo });
-  writeJson(path.join(runPath, "repo", "file-index.json"), { files: evidence.files });
+  writeJson(path.join(runPath, "repo", "file-index.json"), {
+    files: evidence.files,
+    total_files: files.length,
+    truncated,
+    limit: fileIndexLimit
+  });
   writeJson(path.join(runPath, "repo", "evidence-map.json"), evidence);
   writeText(
     path.join(runPath, "input", "review-target.md"),
@@ -63,6 +75,7 @@ export function buildReviewEvidence(runPath, repoPath) {
 - Indexed files: ${files.length}
 - Docs found: ${docs.length}
 - Tests found: ${tests.length}
+${truncated ? `- Warning: ${evidence.file_index_warning}` : ""}
 `
   );
 

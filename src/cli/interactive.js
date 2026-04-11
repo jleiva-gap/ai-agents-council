@@ -375,6 +375,30 @@ async function promptForChoice(rl, prompt, choices, defaultValue) {
   }
 }
 
+function formatStoryAgentOption(agent = {}) {
+  const label = String(agent.label ?? agent.id ?? agent.provider ?? "agent").trim();
+  const adapter = [agent.provider, agent.model].filter(Boolean).join(" / ");
+  return adapter ? `${label} [${adapter}]` : label;
+}
+
+async function promptForStoryAgent(rl, storyAgents = []) {
+  if (!Array.isArray(storyAgents) || storyAgents.length === 0) {
+    return null;
+  }
+
+  if (storyAgents.length === 1) {
+    return storyAgents[0].id;
+  }
+
+  panel(`${icon("tools")} Story Ticket Agent`, [
+    "Choose which AI agent should create the exported story tickets.",
+    ...storyAgents.map((agent, index) => `${index + 1}. ${formatStoryAgentOption(agent)}`)
+  ]);
+
+  const selected = await promptForNumberInRange(rl, "Story ticket agent", 1, storyAgents.length, 1);
+  return storyAgents[selected - 1]?.id ?? null;
+}
+
 async function promptForAgentList(rl, label, councilAgents, minimum = 1, fallbackIndexes = [0]) {
   while (true) {
     const response = (await rl.question(`${label} agent numbers (comma separated)> `)).trim();
@@ -760,18 +784,22 @@ async function promptLatestApproval(rl, frameworkRoot, repoPath) {
       }
 
       if (packagingDecision === 1) {
+        const storyAgent = await promptForStoryAgent(rl, packaging.story_agents ?? []);
         const awfChoice = await promptForChoice(rl, "Generate AWF .wi folder now?", ["yes", "no"], "yes");
         return decideLatest(frameworkRoot, repoPath, {
           decision: "approve",
           story_export_mode: "single",
+          story_agent: storyAgent,
           create_awf: awfChoice === "yes"
         });
       }
 
       if (packagingDecision === 2) {
+        const storyAgent = await promptForStoryAgent(rl, packaging.story_agents ?? []);
         return decideLatest(frameworkRoot, repoPath, {
           decision: "approve",
-          story_export_mode: "split"
+          story_export_mode: "split",
+          story_agent: storyAgent
         });
       }
 

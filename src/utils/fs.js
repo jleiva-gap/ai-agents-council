@@ -18,7 +18,12 @@ export function readJson(filePath, fallback = {}) {
     return fallback;
   }
 
-  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (error) {
+    console.warn(`[ai-agents-council] Failed to parse JSON at ${filePath}. Using fallback. ${error.message ?? String(error)}`);
+    return fallback;
+  }
 }
 
 export function writeJson(filePath, value) {

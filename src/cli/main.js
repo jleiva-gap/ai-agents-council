@@ -66,7 +66,8 @@ export async function main(argv) {
           reason: getOption(options, "reason"),
           notes: getOption(options, "notes"),
           create_awf: getBooleanOption(options, "create-awf"),
-          story_export_mode: getOption(options, "story-export-mode")
+          story_export_mode: getOption(options, "story-export-mode"),
+          story_agent: getOption(options, "story-agent") ?? getOption(options, "ticket-agent")
         }));
         return;
       case "export-awf":

@@ -164,7 +164,7 @@ test("clarification answers allow proposal to continue", async () => {
   assert.equal(fs.existsSync(path.join(result.work_path, "rounds", "01-proposal")), true);
 });
 
-test("implicit acceptance criteria do not force a generic scope question", async () => {
+test("implicit acceptance criteria plus an explicit boundary can skip clarification", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-implicit-ac-"));
   copyDir(path.resolve("."), root);
 
@@ -173,12 +173,13 @@ test("implicit acceptance criteria do not force a generic scope question", async
     prompt: "Add an audit trail so every successful student update records an audit entry and the public API stays unchanged."
   });
 
-  assert.equal(result.status, "awaiting_clarification");
+  assert.equal(result.status, "pending_approval");
   const clarification = JSON.parse(fs.readFileSync(path.join(result.work_path, "input", "clarification.json"), "utf8"));
+  assert.equal(clarification.status, "ready_for_planning");
   assert.equal(clarification.questions.some((question) => question.id === "clarify-scope"), false);
   assert.equal(clarification.questions.some((question) => /acceptance criteria/i.test(question.prompt)), false);
   assert.equal(clarification.questions.some((question) => /scope/i.test(question.prompt)), false);
-  assert.equal(clarification.questions.some((question) => /boundary or non-goal/i.test(question.prompt)), true);
+  assert.equal(clarification.questions.some((question) => /boundary or non-goal/i.test(question.prompt)), false);
 });
 
 test("round response artifacts are registered even when providers are not auto-launched", async () => {
@@ -645,6 +646,102 @@ test("large approved results can be previewed and split into multiple structured
   assert.equal(Array.isArray(firstStory.references), true);
 });
 
+test("story export with multiple council agents requires an explicit ticket agent selection", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-story-agent-"));
+  copyDir(path.resolve("."), root);
+
+  const providersPath = path.join(root, "config", "providers.json");
+  const providers = JSON.parse(fs.readFileSync(providersPath, "utf8"));
+  providers.default_provider = "test-provider";
+  providers.providers = {
+    "test-provider": {
+      enabled: true,
+      command: "node",
+      models: [],
+      timeout_ms: 2000,
+      session_mode: "fresh",
+      prompt_transport: "file",
+      launch_command: ["node", "-e", "process.stdout.write('# Response\\n')", "{{PROMPT_FILE}}"]
+    }
+  };
+  fs.writeFileSync(providersPath, JSON.stringify(providers, null, 2), "utf8");
+
+  saveRepoSettings(root, {
+    first_run_complete: true,
+    default_provider: "test-provider",
+    default_participant: {
+      id: "agent-1",
+      provider: "test-provider",
+      model: "model-a",
+      label: "Story Agent A"
+    },
+    auto_launch: false,
+    output_root: ".ai-council/result",
+    council_agents: [
+      { id: "agent-1", provider: "test-provider", model: "model-a", label: "Story Agent A" },
+      { id: "agent-2", provider: "test-provider", model: "model-b", label: "Story Agent B" }
+    ],
+    council_assignments: {
+      axiom: "agent-1",
+      vector: "agent-1",
+      forge: "agent-1",
+      sentinel: "agent-1"
+    },
+    stage_assignments: {
+      proposal: ["agent-1", "agent-2"],
+      critique: ["agent-1"],
+      refinement: ["agent-1"],
+      synthesis: ["agent-1"],
+      validation: ["agent-1"]
+    },
+    provider_overrides: {}
+  });
+
+  const result = await runCouncil(root, root, {
+    mode: "plan",
+    title: "Story agent selection",
+    prompt: [
+      "Create a plan.",
+      "- Define the CLI shell UX",
+      "- Add the approval packaging flow",
+      "- Add structured story exports",
+      "- Preserve existing AWF config",
+      "- Generate a first runtime packet",
+      "- Add tests for split story export"
+    ].join("\n"),
+    clarification_answers: clarificationAnswers()
+  });
+
+  const preview = previewLatestStoryPackaging(root, root);
+  assert.equal(Array.isArray(preview.story_agents), true);
+  assert.equal(preview.story_agents.length, 2);
+  assert.equal(preview.story_agent_required, true);
+
+  await assert.rejects(
+    () => decideLatest(root, root, {
+      decision: "approve",
+      story_export_mode: "split"
+    }),
+    /requires selecting which AI agent will create the tickets/i
+  );
+
+  const approved = await decideLatest(root, root, {
+    decision: "approve",
+    story_export_mode: "split",
+    story_agent: "agent-2"
+  });
+
+  assert.equal(approved.status, "approved");
+  assert.equal(approved.story_export.ticket_agent.id, "agent-2");
+  assert.equal(approved.story_export.ticket_agent.label, "Story Agent B");
+
+  const manifest = JSON.parse(fs.readFileSync(path.join(result.result_path, "story-export", "split-stories", "manifest.json"), "utf8"));
+  assert.equal(manifest.ticket_agent.id, "agent-2");
+  const firstStoryPath = path.join(root, manifest.stories[0].json_path);
+  const firstStory = JSON.parse(fs.readFileSync(firstStoryPath, "utf8"));
+  assert.equal(firstStory.ticket_agent.id, "agent-2");
+});
+
 test("single story approval export can package a structured story and seed AWF together", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-story-single-"));
   copyDir(path.resolve("."), root);
@@ -1071,4 +1168,266 @@ test("configured but unavailable providers stop the run instead of silently drop
     }),
     /Configured council agents are unavailable/
   );
+});
+
+test("later stages use the shared ticket summary instead of repeating the full ticket body", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-shared-summary-"));
+  copyDir(path.resolve("."), root);
+
+  const deepMarker = "UNIQUE-DEEP-MARKER";
+  const result = await runCouncil(root, root, {
+    mode: "plan",
+    title: "Shared ticket context",
+    prompt: [
+      "Ship the council export flow.",
+      "- Keep the public API unchanged.",
+      "- Add automated tests.",
+      `Extended background: ${"details ".repeat(80)}${deepMarker}`
+    ].join("\n"),
+    launch: false,
+    clarification_answers: clarificationAnswers()
+  });
+
+  const proposalDir = path.join(result.work_path, "rounds", "01-proposal");
+  const critiqueDir = path.join(result.work_path, "rounds", "02-critique");
+  const proposalPromptFile = fs.readdirSync(proposalDir).find((file) => file.endsWith(".prompt.md"));
+  const critiquePromptFile = fs.readdirSync(critiqueDir).find((file) => file.endsWith(".prompt.md"));
+  const proposalPrompt = fs.readFileSync(path.join(proposalDir, proposalPromptFile), "utf8");
+  const critiquePrompt = fs.readFileSync(path.join(critiqueDir, critiquePromptFile), "utf8");
+
+  assert.match(proposalPrompt, /<canonical_ticket>/);
+  assert.match(proposalPrompt, new RegExp(escapeRegExp(deepMarker)));
+  assert.match(critiquePrompt, /<shared_ticket_summary>/);
+  assert.match(critiquePrompt, /input\/ticket-summary\.md/);
+  assert.doesNotMatch(critiquePrompt, new RegExp(escapeRegExp(deepMarker)));
+});
+
+test("stage prompts reference supplemental context artifacts when they are provided", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-extra-context-"));
+  copyDir(path.resolve("."), root);
+
+  const providersPath = path.join(root, "config", "providers.json");
+  const providers = JSON.parse(fs.readFileSync(providersPath, "utf8"));
+  providers.default_provider = "test-provider";
+  providers.providers = {
+    "test-provider": {
+      enabled: true,
+      command: "node",
+      models: [],
+      timeout_ms: 2000,
+      session_mode: "fresh",
+      prompt_transport: "file",
+      launch_command: ["node", "-e", "process.stdout.write('# Response\\n')", "{{PROMPT_FILE}}"]
+    }
+  };
+  fs.writeFileSync(providersPath, JSON.stringify(providers, null, 2), "utf8");
+
+  saveRepoSettings(root, {
+    first_run_complete: true,
+    default_provider: "test-provider",
+    default_participant: {
+      id: "agent-1",
+      provider: "test-provider",
+      model: null,
+      label: "Test Provider"
+    },
+    auto_launch: false,
+    output_root: ".ai-council/result",
+    council_agents: [
+      { id: "agent-1", provider: "test-provider", model: null, label: "Test Provider" }
+    ],
+    council_assignments: {
+      axiom: "agent-1",
+      vector: "agent-1",
+      forge: "agent-1",
+      sentinel: "agent-1"
+    },
+    stage_assignments: {
+      proposal: ["agent-1"],
+      critique: ["agent-1"],
+      refinement: ["agent-1"],
+      synthesis: ["agent-1"],
+      validation: ["agent-1"]
+    },
+    provider_overrides: {}
+  });
+
+  const extraContextPath = path.join(root, "extra-context-source.md");
+  const constraintsPath = path.join(root, "constraints-source.md");
+  fs.writeFileSync(extraContextPath, "# Background\n\nSequence the rollout carefully to avoid audit gaps.\n", "utf8");
+  fs.writeFileSync(constraintsPath, "# Constraints\n\n- Preserve the public API.\n", "utf8");
+
+  const result = await runCouncil(root, root, {
+    mode: "plan",
+    prompt: "Add audit logging for successful student updates.",
+    "extra-context-file": extraContextPath,
+    "constraints-file": constraintsPath,
+    launch: false,
+    clarification_answers: clarificationAnswers()
+  });
+
+  const proposalDir = path.join(result.work_path, "rounds", "01-proposal");
+  const proposalPromptFile = fs.readdirSync(proposalDir).find((file) => file.endsWith(".prompt.md"));
+  const proposalPrompt = fs.readFileSync(path.join(proposalDir, proposalPromptFile), "utf8");
+
+  assert.match(proposalPrompt, /## Additional Context Artifacts/);
+  assert.match(proposalPrompt, /input\/extra-context\.md/);
+  assert.match(proposalPrompt, /input\/constraints\.md/);
+  assert.match(proposalPrompt, /Sequence the rollout carefully to avoid audit gaps/i);
+  assert.match(proposalPrompt, /Preserve the public API/i);
+});
+
+test("review prompts reference generated repository evidence artifacts", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-review-context-"));
+  copyDir(path.resolve("."), root);
+  fs.writeFileSync(path.join(root, "review-target.js"), "export const ok = true;\n", "utf8");
+
+  const providersPath = path.join(root, "config", "providers.json");
+  const providers = JSON.parse(fs.readFileSync(providersPath, "utf8"));
+  providers.default_provider = "test-provider";
+  providers.providers = {
+    "test-provider": {
+      enabled: true,
+      command: "node",
+      models: [],
+      timeout_ms: 2000,
+      session_mode: "fresh",
+      prompt_transport: "file",
+      launch_command: ["node", "-e", "process.stdout.write('# Response\\n')", "{{PROMPT_FILE}}"]
+    }
+  };
+  fs.writeFileSync(providersPath, JSON.stringify(providers, null, 2), "utf8");
+
+  saveRepoSettings(root, {
+    first_run_complete: true,
+    default_provider: "test-provider",
+    default_participant: {
+      id: "agent-1",
+      provider: "test-provider",
+      model: null,
+      label: "Test Provider"
+    },
+    auto_launch: false,
+    output_root: ".ai-council/result",
+    council_agents: [
+      { id: "agent-1", provider: "test-provider", model: null, label: "Test Provider" }
+    ],
+    council_assignments: {
+      axiom: "agent-1",
+      vector: "agent-1",
+      forge: "agent-1",
+      sentinel: "agent-1"
+    },
+    stage_assignments: {
+      proposal: ["agent-1"],
+      critique: ["agent-1"],
+      refinement: ["agent-1"],
+      synthesis: ["agent-1"],
+      validation: ["agent-1"]
+    },
+    provider_overrides: {}
+  });
+
+  const result = await runCouncil(root, root, {
+    mode: "review",
+    prompt: "Review the implementation for correctness and completeness.",
+    launch: false,
+    clarification_answers: clarificationAnswers()
+  });
+
+  const proposalDir = path.join(result.work_path, "rounds", "01-proposal");
+  const proposalPromptFile = fs.readdirSync(proposalDir).find((file) => file.endsWith(".prompt.md"));
+  const proposalPrompt = fs.readFileSync(path.join(proposalDir, proposalPromptFile), "utf8");
+
+  assert.match(proposalPrompt, /input\/review-target\.md/);
+  assert.match(proposalPrompt, /repo\/file-index\.json/);
+  assert.match(proposalPrompt, /repo\/evidence-map\.json/);
+});
+
+test("clear tickets skip the AI clarification round-trip before proposal starts", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-skip-clarification-"));
+  copyDir(path.resolve("."), root);
+
+  const promptLogPath = path.join(root, "provider-prompts.log");
+  const scriptPath = path.join(root, "record-provider.cjs");
+  fs.writeFileSync(
+    scriptPath,
+    [
+      "const fs = require('node:fs');",
+      "const logPath = process.argv[2];",
+      "let data = '';",
+      "process.stdin.on('data', chunk => data += chunk);",
+      "process.stdin.on('end', () => {",
+      "  fs.appendFileSync(logPath, data + '\\n---PROMPT---\\n', 'utf8');",
+      "  process.stdout.write('# Response\\n\\nReady.');",
+      "});"
+    ].join("\n"),
+    "utf8"
+  );
+
+  const providersPath = path.join(root, "config", "providers.json");
+  const providers = JSON.parse(fs.readFileSync(providersPath, "utf8"));
+  providers.default_provider = "test-provider";
+  providers.providers = {
+    "test-provider": {
+      enabled: true,
+      command: "node",
+      models: [],
+      timeout_ms: 2000,
+      session_mode: "fresh",
+      prompt_transport: "stdin",
+      launch_command: ["node", scriptPath, promptLogPath]
+    }
+  };
+  fs.writeFileSync(providersPath, JSON.stringify(providers, null, 2), "utf8");
+
+  saveRepoSettings(root, {
+    first_run_complete: true,
+    default_provider: "test-provider",
+    default_participant: {
+      id: "agent-1",
+      provider: "test-provider",
+      model: null,
+      label: "Test Provider"
+    },
+    auto_launch: true,
+    output_root: ".ai-council/result",
+    council_agents: [
+      { id: "agent-1", provider: "test-provider", model: null, label: "Test Provider" }
+    ],
+    council_assignments: {
+      axiom: "agent-1",
+      vector: "agent-1",
+      forge: "agent-1",
+      sentinel: "agent-1"
+    },
+    stage_assignments: {
+      proposal: ["agent-1"],
+      critique: ["agent-1"],
+      refinement: ["agent-1"],
+      synthesis: ["agent-1"],
+      validation: ["agent-1"]
+    },
+    provider_overrides: {}
+  });
+
+  const result = await runCouncil(root, root, {
+    mode: "plan",
+    prompt: [
+      "Add audit logging for successful student updates.",
+      "- Record an audit entry for every successful student update.",
+      "- Keep the public API unchanged."
+    ].join("\n"),
+    launch: true
+  });
+
+  assert.equal(result.status, "pending_approval");
+  assert.equal(fs.existsSync(path.join(result.work_path, "clarification", "axiom.prompt.md")), false);
+
+  const clarification = JSON.parse(fs.readFileSync(path.join(result.work_path, "input", "clarification.json"), "utf8"));
+  assert.equal(clarification.source, "heuristic");
+  assert.equal(clarification.status, "ready_for_planning");
+
+  const promptLog = fs.readFileSync(promptLogPath, "utf8");
+  assert.doesNotMatch(promptLog, /AI Agents Council Clarification Prompt/);
 });

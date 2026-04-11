@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { analyzeProviderHelp, resolveProcessInvocation } from "../src/providers/index.js";
+import { analyzeProviderHelp, findArgTransportLengthIssue, maybeLaunchPrompt, resolveProcessInvocation } from "../src/providers/index.js";
 
 test("claude analysis discovers model aliases from CLI help and validates launch flags", () => {
   const helpText = `
@@ -117,4 +117,69 @@ test("resolveProcessInvocation uses a Windows-safe wrapper for explicit PowerShe
   } finally {
     fs.rmSync(scriptDir, { recursive: true, force: true });
   }
+});
+
+test("resolveProcessInvocation escapes percent expansion for cmd wrappers on Windows", () => {
+  const scriptDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-provider-cmd-"));
+  const scriptPath = path.join(scriptDir, "shim.cmd");
+  fs.writeFileSync(scriptPath, "@echo off\r\necho ok\r\n", "utf8");
+
+  try {
+    const invocation = resolveProcessInvocation(scriptPath, ["%PATH%", "safe"]);
+    if (process.platform === "win32") {
+      assert.match(String(invocation.executable), /cmd\.exe/i);
+      assert.match(String(invocation.args[3]), /%%PATH%%/);
+    } else {
+      assert.equal(invocation.executable, scriptPath);
+      assert.deepEqual(invocation.args, ["%PATH%", "safe"]);
+    }
+  } finally {
+    fs.rmSync(scriptDir, { recursive: true, force: true });
+  }
+});
+
+test("maybeLaunchPrompt does not trust provider-written output files when stdout is empty", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-provider-output-"));
+  const promptFile = path.join(root, "prompt.md");
+  const outputFile = path.join(root, "response.md");
+  fs.writeFileSync(promptFile, "# Prompt\n", "utf8");
+  fs.writeFileSync(outputFile, "# Injected\n", "utf8");
+
+  const result = await maybeLaunchPrompt(promptFile, outputFile, root, {
+    available: true,
+    model: null,
+    prompt_transport: "stdin",
+    timeout_ms: 1000,
+    max_capture_bytes: 4096,
+    launch_command: ["node", "-e", "process.exit(0)"]
+  }, true, null, root);
+
+  assert.equal(result.launched, true);
+  assert.equal(result.stdout, "");
+});
+
+test("maybeLaunchPrompt truncates oversized stdout capture instead of growing unbounded", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-provider-truncate-"));
+  const promptFile = path.join(root, "prompt.md");
+  const outputFile = path.join(root, "response.md");
+  fs.writeFileSync(promptFile, "# Prompt\n", "utf8");
+
+  const result = await maybeLaunchPrompt(promptFile, outputFile, root, {
+    available: true,
+    model: null,
+    prompt_transport: "stdin",
+    timeout_ms: 2000,
+    max_capture_bytes: 256,
+    launch_command: ["node", "-e", "process.stdout.write('x'.repeat(2048))"]
+  }, true, null, root);
+
+  assert.equal(result.launched, true);
+  assert.equal(result.stdout_truncated, true);
+  assert.match(result.stdout, /\[stdout truncated after 256 bytes\]/i);
+  assert.equal(result.stdout.length < 512, true);
+});
+
+test("findArgTransportLengthIssue flags oversized Windows arg launches", () => {
+  const issue = findArgTransportLengthIssue(["copilot", "-p", "x".repeat(7100)], "win32");
+  assert.match(issue ?? "", /windows-safe limit/i);
 });

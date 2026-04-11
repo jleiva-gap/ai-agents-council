@@ -5,6 +5,9 @@ import fs from "node:fs";
 import { commandExists, writeJson } from "../utils/fs.js";
 import { getCouncilIdentity } from "../core/identity.js";
 
+const DEFAULT_MAX_CAPTURE_BYTES = 1024 * 1024;
+const WINDOWS_ARG_PROMPT_SOFT_LIMIT = 7000;
+
 const PROVIDER_PROFILES = {
   codex: {
     help_args: ["exec", "--help"],
@@ -90,11 +93,13 @@ function quoteForCmd(value) {
     return "\"\"";
   }
 
-  if (!/[ \t"&^<>|()]/.test(text)) {
-    return text;
+  const escaped = text.replace(/%/g, "%%");
+
+  if (!/[\s"&^<>|()%]/.test(text)) {
+    return escaped;
   }
 
-  return `"${text.replace(/"/g, "\"\"")}"`;
+  return `"${escaped.replace(/"/g, "\"\"")}"`;
 }
 
 export function resolveProcessInvocation(command, args = []) {
@@ -139,6 +144,19 @@ function normalizeCommandTokens(commandValue) {
   return Array.isArray(commandValue)
     ? commandValue.map((entry) => String(entry ?? "").trim()).filter(Boolean)
     : [];
+}
+
+export function findArgTransportLengthIssue(commandValue = [], platform = process.platform) {
+  if (platform !== "win32") {
+    return null;
+  }
+
+  const commandText = normalizeCommandTokens(commandValue).join(" ");
+  if (commandText.length <= WINDOWS_ARG_PROMPT_SOFT_LIMIT) {
+    return null;
+  }
+
+  return `Prompt launch was blocked because the expanded command is ${commandText.length} characters long, which is above the Windows-safe limit of ${WINDOWS_ARG_PROMPT_SOFT_LIMIT} for argument-based prompt transport. Shorten the prompt context or switch this provider to stdin/file transport.`;
 }
 
 function commandIncludesAny(commandTokens, candidates = []) {
@@ -313,6 +331,7 @@ export function detectProviders(providerConfig = {}, providerOverrides = {}) {
       continue_command: providerOverrides?.[name]?.continue_command ?? config.continue_command ?? null,
       startup_command: providerOverrides?.[name]?.startup_command ?? config.startup_command ?? null,
       timeout_ms: providerOverrides?.[name]?.timeout_ms ?? config.timeout_ms ?? 120000,
+      max_capture_bytes: providerOverrides?.[name]?.max_capture_bytes ?? config.max_capture_bytes ?? DEFAULT_MAX_CAPTURE_BYTES,
       session_mode: providerOverrides?.[name]?.session_mode ?? config.session_mode ?? "fresh",
       prompt_transport: resolvedPromptTransport
     };
@@ -323,6 +342,18 @@ export function buildLaunchCommand(launchCommand, substitutions) {
   return launchCommand.map((part) =>
     String(part).replace(/\{\{([A-Z_]+)\}\}/g, (_, key) => substitutions[`{{${key}}}`] ?? `{{${key}}}`)
   );
+}
+
+function buildLaunchCommandVariants(launchCommand, substitutions, previewSubstitutions = {}) {
+  const command = [];
+  const preview = [];
+
+  for (const part of normalizeCommandTokens(launchCommand)) {
+    command.push(String(part).replace(/\{\{([A-Z_]+)\}\}/g, (_, key) => substitutions[`{{${key}}}`] ?? `{{${key}}}`));
+    preview.push(String(part).replace(/\{\{([A-Z_]+)\}\}/g, (_, key) => previewSubstitutions[`{{${key}}}`] ?? substitutions[`{{${key}}}`] ?? `{{${key}}}`));
+  }
+
+  return { command, preview };
 }
 
 export function assignProviders(council, providerStatus, preferredProvider = null) {
@@ -425,7 +456,8 @@ function spawnProcessAsync(executable, args, options = {}) {
         env: options.env,
         encoding: "utf8",
         input: options.input,
-        timeout: options.timeout
+        timeout: options.timeout,
+        maxBuffer: options.max_capture_bytes ?? DEFAULT_MAX_CAPTURE_BYTES
       });
       resolve({
         status: syncResult.status ?? 1,
@@ -438,9 +470,37 @@ function spawnProcessAsync(executable, args, options = {}) {
 
     let stdout = "";
     let stderr = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     let settled = false;
     let timedOut = false;
     let timeoutId = null;
+    const maxCaptureBytes = Number(options.max_capture_bytes ?? DEFAULT_MAX_CAPTURE_BYTES);
+
+    const appendCapturedChunk = (current, currentBytes, chunk, truncated) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      if (!Number.isFinite(maxCaptureBytes) || maxCaptureBytes <= 0 || truncated) {
+        return { text: current, bytes: currentBytes, truncated };
+      }
+
+      const remaining = Math.max(0, maxCaptureBytes - currentBytes);
+      const slice = remaining > 0 ? buffer.subarray(0, remaining) : buffer.subarray(0, 0);
+      return {
+        text: slice.length > 0 ? `${current}${slice.toString("utf8")}` : current,
+        bytes: currentBytes + slice.length,
+        truncated: truncated || buffer.length > remaining
+      };
+    };
+
+    const finalizeCapturedText = (text, truncated, streamName) => {
+      if (!truncated) {
+        return text;
+      }
+
+      return `${text}\n\n[${streamName} truncated after ${maxCaptureBytes} bytes]\n`;
+    };
 
     const finish = (result) => {
       if (settled) {
@@ -459,10 +519,16 @@ function spawnProcessAsync(executable, args, options = {}) {
     child.stdin.end();
 
     child.stdout.on("data", (chunk) => {
-      stdout += String(chunk);
+      const captured = appendCapturedChunk(stdout, stdoutBytes, chunk, stdoutTruncated);
+      stdout = captured.text;
+      stdoutBytes = captured.bytes;
+      stdoutTruncated = captured.truncated;
     });
     child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
+      const captured = appendCapturedChunk(stderr, stderrBytes, chunk, stderrTruncated);
+      stderr = captured.text;
+      stderrBytes = captured.bytes;
+      stderrTruncated = captured.truncated;
     });
 
     child.on("error", (error) => {
@@ -477,8 +543,10 @@ function spawnProcessAsync(executable, args, options = {}) {
     child.on("close", (code) => {
       finish({
         status: timedOut ? 1 : (code ?? 1),
-        stdout,
-        stderr,
+        stdout: finalizeCapturedText(stdout, stdoutTruncated, "stdout"),
+        stderr: finalizeCapturedText(stderr, stderrTruncated, "stderr"),
+        stdout_truncated: stdoutTruncated,
+        stderr_truncated: stderrTruncated,
         timed_out: timedOut
       });
     });
@@ -497,7 +565,7 @@ export async function maybeLaunchPrompt(promptFile, outputFile, workingDirectory
   const commandTemplate = provider.session_mode === "session" && sessionState?.active && provider.continue_command
     ? provider.continue_command
     : provider.launch_command;
-  let command = buildLaunchCommand(commandTemplate ?? [], {
+  let { command, preview: commandPreview } = buildLaunchCommandVariants(commandTemplate ?? [], {
     "{{PROMPT_FILE}}": promptFile,
     "{{OUTPUT_FILE}}": outputFile,
     "{{WORKING_DIRECTORY}}": workingDirectory,
@@ -505,15 +573,8 @@ export async function maybeLaunchPrompt(promptFile, outputFile, workingDirectory
     "{{SESSION_FILE}}": sessionState?.session_file ?? "",
     "{{PROMPT_TEXT}}": promptText,
     "{{MODEL}}": provider.model ?? ""
-  });
-  let commandPreview = buildLaunchCommand(commandTemplate ?? [], {
-    "{{PROMPT_FILE}}": promptFile,
-    "{{OUTPUT_FILE}}": outputFile,
-    "{{WORKING_DIRECTORY}}": workingDirectory,
-    "{{ARTIFACT_DIRECTORY}}": artifactDirectory ?? workingDirectory,
-    "{{SESSION_FILE}}": sessionState?.session_file ?? "",
-    "{{PROMPT_TEXT}}": "<prompt>",
-    "{{MODEL}}": provider.model ?? ""
+  }, {
+    "{{PROMPT_TEXT}}": "<prompt>"
   });
 
   if (provider.model) {
@@ -528,6 +589,22 @@ export async function maybeLaunchPrompt(promptFile, outputFile, workingDirectory
     return { launched: false, command_preview: commandPreview.join(" "), timed_out: false };
   }
 
+  const argTransportLengthIssue = provider.prompt_transport === "arg"
+    ? findArgTransportLengthIssue(command)
+    : null;
+  if (argTransportLengthIssue) {
+    return {
+      launched: true,
+      command_preview: commandPreview.join(" "),
+      exit_code: 1,
+      stdout: "",
+      stderr: argTransportLengthIssue,
+      stdout_truncated: false,
+      stderr_truncated: false,
+      timed_out: false
+    };
+  }
+
   const [executable, ...args] = command;
   const result = await spawnProcessAsync(executable, args, {
     cwd: workingDirectory,
@@ -536,20 +613,18 @@ export async function maybeLaunchPrompt(promptFile, outputFile, workingDirectory
       ...(provider.model ? { AI_COUNCIL_MODEL: provider.model } : {})
     },
     input: provider.prompt_transport === "stdin" ? promptText : undefined,
-    timeout: provider.timeout_ms
+    timeout: provider.timeout_ms,
+    max_capture_bytes: provider.max_capture_bytes ?? DEFAULT_MAX_CAPTURE_BYTES
   });
-
-  let effectiveStdout = result.stdout ?? "";
-  if (!effectiveStdout && fs.existsSync(outputFile)) {
-    effectiveStdout = fs.readFileSync(outputFile, "utf8");
-  }
 
   return {
     launched: true,
     command_preview: commandPreview.join(" "),
     exit_code: result.status ?? 1,
-    stdout: effectiveStdout,
+    stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
+    stdout_truncated: result.stdout_truncated === true,
+    stderr_truncated: result.stderr_truncated === true,
     timed_out: result.timed_out === true
   };
 }
@@ -579,7 +654,8 @@ export async function maybeRunProviderStartup(provider, targetRepo, launch = fal
     : ["-lc", commandText];
   const result = await spawnProcessAsync(shell, args, {
     cwd: targetRepo,
-    timeout: provider.timeout_ms
+    timeout: provider.timeout_ms,
+    max_capture_bytes: provider.max_capture_bytes ?? DEFAULT_MAX_CAPTURE_BYTES
   });
 
   return {

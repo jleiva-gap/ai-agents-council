@@ -76,5 +76,6 @@ Common options:
   --decision <name>     approve | request_changes | reject
   --create-awf          Export .wi AWF artifacts immediately after approval
   --story-export-mode   none | single | split
+  --story-agent <id>    Council AI agent that should create exported stories/tickets
 `);
 }

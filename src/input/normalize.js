@@ -2,7 +2,7 @@ import path from "node:path";
 
 import { copyFile, readText, writeJson, writeText } from "../utils/fs.js";
 
-function parseAcceptanceCriteria(content) {
+function parseListItems(content) {
   return String(content)
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -16,8 +16,14 @@ function normalizeAcceptanceCriteria(items = []) {
     .filter((item) => item && !/^(acceptance criteria were not explicitly listed in the input|none recorded yet|tbd|not provided)$/i.test(item));
 }
 
+function parseAcceptanceCriteria(content) {
+  const sections = parseSections(content);
+  return parseListItems(sections.acceptance_criteria);
+}
+
 function sectionsFromPrompt(prompt, title) {
-  const acceptance = parseAcceptanceCriteria(prompt);
+  const acceptance = parseListItems(prompt);
+  const businessGoal = deriveBusinessGoal(prompt);
   return `# Ticket Definition
 
 ## Title
@@ -30,7 +36,7 @@ Prompt
 ${prompt.trim()}
 
 ## Business Goal
-${prompt.trim()}
+${businessGoal}
 
 ## Technical Objective
 Clarify the best path to deliver the request.
@@ -45,6 +51,26 @@ ${acceptance.length > 0 ? acceptance.map((item) => `- ${item}`).join("\n") : ""}
 ## Open Questions
 - None recorded yet
 `;
+}
+
+function normalizeUrl(value, optionName = "--jira-url") {
+  const rawValue = String(value ?? "").trim();
+  if (!rawValue) {
+    return "";
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(rawValue);
+  } catch {
+    throw new Error(`${optionName} must be a valid HTTPS URL.`);
+  }
+
+  if (parsed.protocol !== "https:") {
+    throw new Error(`${optionName} must use HTTPS.`);
+  }
+
+  return parsed.toString();
 }
 
 function inferCanonicalInput(options = {}) {
@@ -68,6 +94,7 @@ function inferCanonicalInput(options = {}) {
   }
 
   if (options["jira-url"]) {
+    const jiraUrl = normalizeUrl(options["jira-url"], "--jira-url");
     return {
       sourceType: "jira",
       canonicalContent: `# Ticket Definition
@@ -79,7 +106,7 @@ ${title || "Jira ticket"}
 Jira URL
 
 ## Reference Links
-- ${options["jira-url"]}
+- ${jiraUrl}
 
 ## Summary
 This ticket was normalized from a Jira URL. MCP-backed field extraction can be added later, but the council can already work from this canonical file.
@@ -91,6 +118,7 @@ This ticket was normalized from a Jira URL. MCP-backed field extraction can be a
   }
 
   if (inferredJira) {
+    const jiraUrl = normalizeUrl(ticketSource, "--ticket-source");
     return {
       sourceType: "jira",
       canonicalContent: `# Ticket Definition
@@ -102,7 +130,7 @@ ${title || "Jira ticket"}
 Jira URL
 
 ## Reference Links
-- ${ticketSource}
+- ${jiraUrl}
 
 ## Summary
 This ticket was normalized from a Jira URL. MCP-backed field extraction can be added later, but the council can already work from this canonical file.
@@ -142,8 +170,154 @@ function parseSections(content) {
   return Object.fromEntries(Object.entries(sections).map(([key, lines]) => [key, lines.join("\n").trim()]));
 }
 
+function deriveBusinessGoal(prompt) {
+  const lines = String(prompt ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const candidate = lines.find((line) => !/^[-*]\s+/.test(line) && !/^\d+\.\s+/.test(line)) ?? lines[0] ?? "";
+  return compactText(candidate.replace(/^#+\s*/, ""), 160) || "Clarify the business outcome to deliver the request.";
+}
+
+function compactText(text, maxLength = 280) {
+  const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function buildOmissionNote(omittedCount, label) {
+  if (!Number.isFinite(omittedCount) || omittedCount <= 0) {
+    return "";
+  }
+
+  return `- Note: ${omittedCount} more ${label} omitted. Open \`input/ticket-definition.md\` for the full list.`;
+}
+
+function summarizeList(text, limit = 4, itemMaxLength = 140) {
+  const items = parseListItems(text)
+    .map((item) => compactText(item, itemMaxLength))
+    .filter((item) => item && !looksPlaceholder(item))
+  return {
+    items: items.slice(0, limit),
+    omitted_count: Math.max(0, items.length - limit)
+  };
+}
+
+function appendSummarySection(lines, heading, summary, label) {
+  if ((summary?.items?.length ?? 0) === 0 && (summary?.omitted_count ?? 0) === 0) {
+    return;
+  }
+
+  lines.push("", `## ${heading}`, "");
+  for (const item of summary.items ?? []) {
+    lines.push(`- ${item}`);
+  }
+
+  const omissionNote = buildOmissionNote(summary?.omitted_count ?? 0, label);
+  if (omissionNote) {
+    lines.push(omissionNote);
+  }
+}
+
+function parseClarificationAnswerPairs(content) {
+  const answers = [];
+  const lines = String(content ?? "").split(/\r?\n/);
+  let inSection = false;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^##\s+Clarification Answers\s*$/i.test(line.trim())) {
+      inSection = true;
+      continue;
+    }
+
+    if (inSection && /^##\s+/.test(line.trim())) {
+      break;
+    }
+
+    if (!inSection) {
+      continue;
+    }
+
+    const promptMatch = line.match(/^\d+\.\s+(.+)$/);
+    if (!promptMatch) {
+      continue;
+    }
+
+    const answerLine = lines[index + 1] ?? "";
+    const answerMatch = answerLine.match(/^Answer:\s*(.+)$/i);
+    if (!answerMatch) {
+      continue;
+    }
+
+    answers.push({
+      prompt: compactText(promptMatch[1], 100),
+      answer: compactText(answerMatch[1], 140)
+    });
+    index += 1;
+  }
+
+  return answers;
+}
+
 function looksPlaceholder(text) {
   return /no prompt supplied|normalized from a jira url|none recorded yet|clarify the best path/i.test(String(text ?? "").trim());
+}
+
+export function buildCanonicalTicketSummary(content) {
+  const sections = parseSections(content);
+  const title = compactText(sections.title, 120) || "Untitled request";
+  const summary = compactText(sections.summary || sections.business_goal || sections.technical_objective, 320);
+  const businessGoal = compactText(sections.business_goal, 220);
+  const technicalObjective = compactText(sections.technical_objective, 220);
+  const scope = summarizeList(sections.scope, 4, 120);
+  const acceptance = summarizeList(sections.acceptance_criteria, 6, 120);
+  const constraints = summarizeList(sections.constraints, 4, 120);
+  const references = summarizeList(sections.reference_links, 4, 120);
+  const allClarificationAnswers = parseClarificationAnswerPairs(content);
+  const clarificationAnswers = allClarificationAnswers.slice(0, 4);
+  const clarificationOmittedCount = Math.max(0, allClarificationAnswers.length - clarificationAnswers.length);
+  const lines = [
+    "# Canonical Ticket Summary",
+    "",
+    `- Title: ${title}`
+  ];
+
+  if (summary && !looksPlaceholder(summary)) {
+    lines.push(`- Summary: ${summary}`);
+  }
+  if (businessGoal && !looksPlaceholder(businessGoal)) {
+    lines.push(`- Business goal: ${businessGoal}`);
+  }
+  if (technicalObjective && !looksPlaceholder(technicalObjective)) {
+    lines.push(`- Technical objective: ${technicalObjective}`);
+  }
+
+  appendSummarySection(lines, "Scope", scope, "scope items");
+  appendSummarySection(lines, "Acceptance Criteria", acceptance, "acceptance criteria");
+  appendSummarySection(lines, "Constraints", constraints, "constraints");
+  if (clarificationAnswers.length > 0) {
+    lines.push(
+      "",
+      "## Clarification Answers",
+      "",
+      ...clarificationAnswers.map((entry) => `- ${entry.prompt}: ${entry.answer}`)
+    );
+    const clarificationNote = buildOmissionNote(clarificationOmittedCount, "clarification answers");
+    if (clarificationNote) {
+      lines.push(clarificationNote);
+    }
+  }
+  appendSummarySection(lines, "Reference Links", references, "reference links");
+
+  return `${lines.join("\n").trimEnd()}\n`;
 }
 
 function summarizeTicketIntent(sections, acceptance) {
@@ -156,7 +330,12 @@ function summarizeTicketIntent(sections, acceptance) {
 }
 
 function hasExplicitBoundarySignal(text) {
-  return /\b(only|without|must not|do not|don't|keep existing|preserve|exclude|out of scope|no api change)\b/i.test(String(text ?? ""));
+  return /\b(only|without|must not|do not|don't|keep existing|keep [a-z0-9_\s-]+ unchanged|leave [a-z0-9_\s-]+ unchanged|preserve|exclude|out of scope|no api change|unchanged)\b/i.test(String(text ?? ""));
+}
+
+function hasImplicitAcceptanceSignal(text) {
+  return /\b(so|that)\b.+\b(add|record|persist|write|return|keep|leave|preserve|remain|stay|emit|validate|pass)(?:s|ed|ing)?\b/i.test(String(text ?? ""))
+    || /\bevery\s+(successful|new|updated?)\b/i.test(String(text ?? ""));
 }
 
 function likelyBroadOrAmbiguousBoundary(text) {
@@ -169,6 +348,8 @@ export function buildClarificationQuestions(canonicalContent, mode = "plan") {
   const questions = [];
   const intent = summarizeTicketIntent(sections, acceptance);
   const boundaryContext = [intent, ...acceptance, sections.constraints, sections.scope].filter(Boolean).join(" ");
+  const implicitAcceptance = hasImplicitAcceptanceSignal(intent);
+  const needsAcceptanceClarification = acceptance.length === 0 && mode !== "debate" && !implicitAcceptance;
 
   if (!sections.summary || looksPlaceholder(sections.summary)) {
     questions.push({
@@ -177,7 +358,7 @@ export function buildClarificationQuestions(canonicalContent, mode = "plan") {
     });
   }
 
-  if (acceptance.length === 0 && mode !== "debate") {
+  if (needsAcceptanceClarification) {
     questions.push({
       id: "clarify-acceptance",
       prompt: `Reading the request, what concrete outcomes or checks should tell the council that "${intent || "this work"}" is done?`
@@ -185,7 +366,7 @@ export function buildClarificationQuestions(canonicalContent, mode = "plan") {
   }
 
   if (!sections.scope && ["plan", "design", "spike"].includes(mode)
-    && (acceptance.length === 0 || likelyBroadOrAmbiguousBoundary(boundaryContext))) {
+    && (needsAcceptanceClarification || likelyBroadOrAmbiguousBoundary(boundaryContext))) {
     questions.push({
       id: "clarify-scope",
       prompt: `Should "${intent || "this request"}" stay tightly focused on the described outcome, or does the story also expect nearby follow-on work to be included?`
@@ -215,6 +396,7 @@ export function previewNormalizedInput(options = {}, mode = "plan") {
     },
     acceptance_criteria: normalizeAcceptanceCriteria(parseAcceptanceCriteria(canonicalContent)),
     canonical_content: canonicalContent,
+    canonical_summary: buildCanonicalTicketSummary(canonicalContent),
     clarification_questions: buildClarificationQuestions(canonicalContent, mode)
   };
 }
@@ -242,6 +424,7 @@ function appendClarificationAnswers(canonicalContent, answers = []) {
 export function normalizeInput(runPath, options = {}) {
   const inputDir = path.join(runPath, "input");
   const ticketPath = path.join(inputDir, "ticket-definition.md");
+  const summaryPath = path.join(inputDir, "ticket-summary.md");
   const preview = previewNormalizedInput(options, options.mode ?? "plan");
   const sourceType = preview.metadata.source_type;
   let canonicalContent = appendClarificationAnswers(preview.canonical_content, options.clarification_answers);
@@ -255,8 +438,14 @@ export function normalizeInput(runPath, options = {}) {
   }
 
   writeText(ticketPath, canonicalContent);
+  const canonicalSummary = buildCanonicalTicketSummary(canonicalContent);
+  writeText(summaryPath, canonicalSummary);
   if (sourceType === "jira") {
-    writeJson(path.join(inputDir, "jira-source.json"), { url: options["jira-url"] ?? String(options["ticket-source"] ?? "").trim() });
+    writeJson(path.join(inputDir, "jira-source.json"), {
+      url: options["jira-url"]
+        ? normalizeUrl(options["jira-url"], "--jira-url")
+        : normalizeUrl(String(options["ticket-source"] ?? "").trim(), "--ticket-source")
+    });
   }
 
   for (const [optionName, filename] of [
@@ -283,6 +472,7 @@ export function normalizeInput(runPath, options = {}) {
       canonicalContent.match(/## Title\s+([\s\S]*?)\n## /)?.[1]?.trim() ??
       "Untitled request",
     canonical_ticket: "input/ticket-definition.md",
+    canonical_ticket_summary: "input/ticket-summary.md",
     acceptance_criteria_count: acceptance.length
   };
 
@@ -290,8 +480,10 @@ export function normalizeInput(runPath, options = {}) {
 
   return {
     ticket_path: ticketPath,
+    ticket_summary_path: summaryPath,
     metadata,
     acceptance_criteria: acceptance,
-    canonical_content: canonicalContent || readText(ticketPath)
+    canonical_content: canonicalContent || readText(ticketPath),
+    canonical_summary: canonicalSummary
   };
 }
