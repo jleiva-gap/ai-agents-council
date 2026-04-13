@@ -11,7 +11,7 @@ Council identities are consistent across prompts, run artifacts, and logs:
 - `Forge` for refinement and implementation framing
 - `Sentinel` for review and validation
 
-The council now follows a deliberation cycle inspired by `converge.md`:
+The council now follows a deliberation cycle inspired by [converge.md](converge.md):
 
 - proposal
 - critique
@@ -97,7 +97,7 @@ If a configured AI CLI is unavailable, AI Agents Council now stops before delibe
 
 More docs:
 
-- [installation.md](C:\GAP\agents\ai-council\docs\installation.md)
-- [quickstart.md](C:\GAP\agents\ai-council\docs\quickstart.md)
-- [council-identity.md](C:\GAP\agents\ai-council\docs\council-identity.md)
-- [final-deliverable-trace-proposal.md](C:\GAP\agents\ai-council\docs\final-deliverable-trace-proposal.md)
+- [installation.md](docs/installation.md)
+- [quickstart.md](docs/quickstart.md)
+- [council-identity.md](docs/council-identity.md)
+- [final-deliverable-trace-proposal.md](docs/final-deliverable-trace-proposal.md)
