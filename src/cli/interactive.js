@@ -1,9 +1,10 @@
 import path from "node:path";
 import readline from "node:readline/promises";
 
+import { deriveClarificationAnswerOptions } from "../clarification/stage.js";
 import { hasCompletedFirstRun, loadRepoSettings, saveRepoSettings } from "../core/config.js";
 import { getCouncilVisualReference, getDeliberationCycle } from "../core/identity.js";
-import { clarifyLatest, decideLatest, exportLatestToAwf, getStatus, previewLatestStoryPackaging, runCouncil, toolingStatus } from "../core/workflow.js";
+import { clarifyLatest, decideLatest, exportLatestToAwf, exportLatestToStoryPackage, getStatus, previewLatestStoryPackaging, runCouncil, toolingStatus } from "../core/workflow.js";
 import { formatPanelLines } from "./render.js";
 
 const ANSI = {
@@ -257,13 +258,22 @@ function renderHome(status, settings, repoPath) {
         "8. Exit"
       ]);
     } else if (status.status === "approved") {
-      panel(`${icon("next")} Next Steps`, [
-        "1. Export approved result to AWF",
-        "2. Show latest artifacts",
-        "3. Start a new run",
-        "4. Configure this repo",
-        "5. Exit"
-      ]);
+      panel(`${icon("next")} Next Steps`, status.story_export
+        ? [
+          "1. Export approved result to AWF",
+          "2. Show latest artifacts",
+          "3. Start a new run",
+          "4. Configure this repo",
+          "5. Exit"
+        ]
+        : [
+          "1. Package approved result as a story",
+          "2. Export approved result to AWF",
+          "3. Show latest artifacts",
+          "4. Start a new run",
+          "5. Configure this repo",
+          "6. Exit"
+        ]);
     } else {
       panel(`${icon("next")} Next Steps`, [
         "1. Start a new run",
@@ -764,54 +774,26 @@ async function promptLatestApproval(rl, frameworkRoot, repoPath) {
   }
 
   if (decision === 1) {
-    const packaging = previewLatestStoryPackaging(frameworkRoot, repoPath);
-    if (packaging.is_large_result && packaging.can_split) {
-      panel(`${icon("tools")} Approval Packaging`, [
-        "This result is large enough that packaging it as implementation stories may make handoff easier.",
-        `Tasks: ${packaging.task_count}`,
-        `Acceptance criteria: ${packaging.acceptance_count}`,
-        `Approximate result words: ${packaging.word_count}`,
-        `Suggested split stories: ${packaging.suggested_story_count}`,
-        "",
-        "1. Create a single story",
-        "2. Split into multiple stories",
-        "3. Approve only",
-        "4. Decide later"
-      ]);
-      const packagingDecision = await promptForNumberInRange(rl, "Approval packaging", 1, 4, 1);
-      if (packagingDecision === 4) {
-        return { status: "pending_approval" };
-      }
+    const packagingChoice = await promptForStoryPackaging(rl, frameworkRoot, repoPath, {
+      allowApproveOnly: true,
+      cancelLabel: "Decide later"
+    });
+    if (packagingChoice.cancelled) {
+      return { status: "pending_approval" };
+    }
 
-      if (packagingDecision === 1) {
-        const storyAgent = await promptForStoryAgent(rl, packaging.story_agents ?? []);
-        const awfChoice = await promptForChoice(rl, "Generate AWF .wi folder now?", ["yes", "no"], "yes");
-        return decideLatest(frameworkRoot, repoPath, {
-          decision: "approve",
-          story_export_mode: "single",
-          story_agent: storyAgent,
-          create_awf: awfChoice === "yes"
-        });
-      }
-
-      if (packagingDecision === 2) {
-        const storyAgent = await promptForStoryAgent(rl, packaging.story_agents ?? []);
-        return decideLatest(frameworkRoot, repoPath, {
-          decision: "approve",
-          story_export_mode: "split",
-          story_agent: storyAgent
-        });
-      }
-
+    if (packagingChoice.approveOnly) {
       return decideLatest(frameworkRoot, repoPath, {
-        decision: "approve"
+        decision: "approve",
+        story_export_mode: "none"
       });
     }
 
-    const exportChoice = await promptForChoice(rl, "Export approved result to AWF now?", ["yes", "no"], "no");
     return decideLatest(frameworkRoot, repoPath, {
       decision: "approve",
-      create_awf: exportChoice === "yes"
+      story_export_mode: packagingChoice.mode,
+      story_agent: packagingChoice.storyAgent,
+      create_awf: packagingChoice.createAwf
     });
   }
 
@@ -822,19 +804,158 @@ async function promptLatestApproval(rl, frameworkRoot, repoPath) {
   });
 }
 
-async function askClarificationQuestion(rl, question, index, total) {
+async function promptForStoryPackaging(rl, frameworkRoot, repoPath, options = {}) {
+  const packaging = previewLatestStoryPackaging(frameworkRoot, repoPath);
+  const rows = [
+    packaging.is_large_result && packaging.can_split
+      ? "This result is large enough that packaging it as implementation stories may make handoff easier."
+      : "Package the approved result as an implementation story before handing it off.",
+    `Tasks: ${packaging.task_count}`,
+    `Acceptance criteria: ${packaging.acceptance_count}`,
+    `Approximate result words: ${packaging.word_count}`,
+    ...(packaging.can_split ? [`Suggested split stories: ${packaging.suggested_story_count}`] : []),
+    ...(packaging.suggested_epic_count > 0 ? [`Suggested epics: ${packaging.suggested_epic_count}`] : []),
+    ""
+  ];
+
+  const choices = [
+    { action: "single", label: "Create a single story" },
+    ...(packaging.can_split ? [{ action: "split", label: "Split into multiple stories" }] : []),
+    ...(options.allowApproveOnly ? [{ action: "approve_only", label: "Approve only" }] : []),
+    { action: "cancel", label: options.cancelLabel ?? "Cancel" }
+  ];
+
+  panel(`${icon("tools")} Approval Packaging`, [
+    ...rows,
+    ...choices.map((choice, index) => `${index + 1}. ${choice.label}`)
+  ]);
+
+  const defaultSelection = 1;
+  const selected = await promptForNumberInRange(rl, "Approval packaging", 1, choices.length, defaultSelection);
+  const choice = choices[selected - 1];
+  if (!choice || choice.action === "cancel") {
+    return { cancelled: true };
+  }
+
+  if (choice.action === "approve_only") {
+    return { cancelled: false, approveOnly: true };
+  }
+
+  const storyAgent = await promptForStoryAgent(rl, packaging.story_agents ?? []);
+  const createAwf = choice.action === "single"
+    ? (await promptForChoice(rl, "Generate AWF .wi folder now?", ["yes", "no"], "no")) === "yes"
+    : false;
+
+  return {
+    cancelled: false,
+    approveOnly: false,
+    mode: choice.action,
+    storyAgent,
+    createAwf
+  };
+}
+
+function buildClarificationOptionRows(answerOptions = []) {
+  return [
+    "Possible answers:",
+    ...answerOptions.map((option, index) => `${index + 1}. ${option}`),
+    `${answerOptions.length + 1}. Other`
+  ];
+}
+
+async function promptClarificationTextSelection(rl, answerOptions = []) {
+  const otherSelection = answerOptions.length + 1;
+
+  while (true) {
+    const selection = (await rl.question("Answer number> ")).trim();
+    if (!selection) {
+      return "";
+    }
+
+    if (selection.toLowerCase() === "exit") {
+      return null;
+    }
+
+    const numeric = parseNumberSelection(selection, 1, otherSelection);
+    if (numeric === otherSelection) {
+      const customAnswer = (await rl.question("Other answer> ")).trim();
+      if (customAnswer.toLowerCase() === "exit") {
+        return null;
+      }
+      return customAnswer;
+    }
+
+    if (numeric !== null) {
+      return answerOptions[numeric - 1] ?? "";
+    }
+
+    console.log(warn(`Select a number between 1 and ${otherSelection}.`));
+  }
+}
+
+async function promptClarificationListSelection(rl, answerOptions = []) {
+  const selectedAnswers = [];
+  const otherSelection = answerOptions.length + 1;
+
+  while (true) {
+    const selection = (await rl.question("Answer number> ")).trim();
+    if (!selection) {
+      break;
+    }
+
+    if (selection.toLowerCase() === "exit") {
+      return null;
+    }
+
+    const numeric = parseNumberSelection(selection, 1, otherSelection);
+    if (numeric === otherSelection) {
+      const customAnswer = (await rl.question("Other answer> ")).trim();
+      if (customAnswer.toLowerCase() === "exit") {
+        return null;
+      }
+      if (customAnswer) {
+        selectedAnswers.push(customAnswer);
+      }
+      continue;
+    }
+
+    if (numeric !== null) {
+      const option = answerOptions[numeric - 1];
+      if (option) {
+        selectedAnswers.push(option);
+      }
+      continue;
+    }
+
+    console.log(warn(`Select a number between 1 and ${otherSelection}.`));
+  }
+
+  return Array.from(new Set(selectedAnswers)).join("; ").trim();
+}
+
+export async function askClarificationQuestion(rl, question, index, total) {
+  const answerOptions = deriveClarificationAnswerOptions(question);
   panel(`${icon("warn")} Clarification ${index + 1}/${total}`, [
     question.prompt,
     ...(question.observation ? [`Observation: ${question.observation}`] : []),
     ...(question.answer_guidance ? [`Guidance: ${question.answer_guidance}`] : []),
+    ...(answerOptions.length > 0 ? ["", ...buildClarificationOptionRows(answerOptions)] : []),
     "",
     question.response_format === "list"
-      ? "Enter one item per line, then press Enter on a blank line to finish."
+      ? answerOptions.length > 0
+        ? "Select one number at a time, choose Other for a custom item, then press Enter on a blank line to finish."
+        : "Enter one item per line, then press Enter on a blank line to finish."
+      : answerOptions.length > 0
+        ? "Select the number that best fits. Choose Other to type a custom answer."
       : "Provide the shortest answer that removes the planning blocker.",
     "Type `exit` to stop and keep the current clarification state."
   ]);
 
   if (question.response_format === "list") {
+    if (answerOptions.length > 0) {
+      return promptClarificationListSelection(rl, answerOptions);
+    }
+
     const entries = [];
     while (true) {
       const entry = (await rl.question("Answer> ")).trim();
@@ -849,6 +970,10 @@ async function askClarificationQuestion(rl, question, index, total) {
     return entries.join("; ").trim();
   }
 
+  if (answerOptions.length > 0) {
+    return promptClarificationTextSelection(rl, answerOptions);
+  }
+
   const answer = (await rl.question("Answer> ")).trim();
   if (answer.toLowerCase() === "exit") {
     return null;
@@ -856,7 +981,7 @@ async function askClarificationQuestion(rl, question, index, total) {
   return answer;
 }
 
-async function promptClarificationAnswers(rl, questions = []) {
+export async function promptClarificationAnswers(rl, questions = []) {
   if (!Array.isArray(questions) || questions.length === 0) {
     return [];
   }
@@ -978,6 +1103,8 @@ function formatProgressEvent(event) {
   switch (event.type) {
     case "run_created":
       return "Created run workspace";
+    case "run_resumed":
+      return "Resumed existing run workspace";
     case "input_normalized":
       return `Normalized ${event.source_type} input for "${event.title}"`;
     case "review_evidence_created":
@@ -1223,17 +1350,67 @@ export async function startShell(frameworkRoot, repoPath) {
       }
 
       if (status.status === "approved") {
+        if (status.story_export) {
+          if (response === "1") {
+            exportLatestToAwf(frameworkRoot, repoPath);
+            continue;
+          }
+          if (response === "2") {
+            clearScreen();
+            renderArtifacts(status);
+            await waitForContinue(rl);
+            continue;
+          }
+          if (response === "3") {
+            const action = await promptRun(rl, frameworkRoot, repoPath, settings);
+            if (action.cancelled) {
+              continue;
+            }
+            if (action.reconfigure) {
+              settings = await configureWorkspace(repoPath, rl, tools, settings);
+              continue;
+            }
+            clearScreen();
+            renderRunResult(action.result);
+            if (action.result?.status === "pending_approval") {
+              await promptLatestApproval(rl, frameworkRoot, repoPath);
+            }
+            await waitForContinue(rl);
+            continue;
+          }
+          if (response === "4") {
+            settings = await configureWorkspace(repoPath, rl, tools, settings);
+            continue;
+          }
+          if (response === "5" || response.toLowerCase() === "exit") {
+            return { status: "exited" };
+          }
+          continue;
+        }
+
         if (response === "1") {
-          exportLatestToAwf(frameworkRoot, repoPath);
+          const packagingChoice = await promptForStoryPackaging(rl, frameworkRoot, repoPath);
+          if (packagingChoice.cancelled) {
+            continue;
+          }
+          await exportLatestToStoryPackage(frameworkRoot, repoPath, {
+            story_export_mode: packagingChoice.mode,
+            story_agent: packagingChoice.storyAgent,
+            create_awf: packagingChoice.createAwf
+          });
           continue;
         }
         if (response === "2") {
+          exportLatestToAwf(frameworkRoot, repoPath);
+          continue;
+        }
+        if (response === "3") {
           clearScreen();
           renderArtifacts(status);
           await waitForContinue(rl);
           continue;
         }
-        if (response === "3") {
+        if (response === "4") {
           const action = await promptRun(rl, frameworkRoot, repoPath, settings);
           if (action.cancelled) {
             continue;
@@ -1250,11 +1427,11 @@ export async function startShell(frameworkRoot, repoPath) {
           await waitForContinue(rl);
           continue;
         }
-        if (response === "4") {
+        if (response === "5") {
           settings = await configureWorkspace(repoPath, rl, tools, settings);
           continue;
         }
-        if (response === "5" || response.toLowerCase() === "exit") {
+        if (response === "6" || response.toLowerCase() === "exit") {
           return { status: "exited" };
         }
         continue;

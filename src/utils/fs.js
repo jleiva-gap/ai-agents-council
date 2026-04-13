@@ -45,6 +45,12 @@ export function appendText(filePath, value) {
 }
 
 export function copyFile(sourcePath, targetPath) {
+  const resolvedSource = path.resolve(sourcePath);
+  const resolvedTarget = path.resolve(targetPath);
+  if (resolvedSource === resolvedTarget) {
+    return targetPath;
+  }
+
   ensureDir(path.dirname(targetPath));
   fs.copyFileSync(sourcePath, targetPath);
   return targetPath;

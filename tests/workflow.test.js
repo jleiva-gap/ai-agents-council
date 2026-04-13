@@ -55,6 +55,119 @@ function clarificationAnswers() {
   ];
 }
 
+function storyPackagingProviderScript() {
+  return `
+const fs = require('fs');
+
+const prompt = fs.readFileSync(process.argv[2], 'utf8');
+if (!prompt.includes('Story Packaging Prompt')) {
+  process.stdout.write('# Response\\n');
+  process.exit(0);
+}
+
+const modeMatch = prompt.match(/## Export Mode\\s+([a-z]+)/i);
+const mode = (modeMatch && modeMatch[1] ? modeMatch[1] : 'single').toLowerCase();
+const tasksMatch = prompt.match(/<tasks_json>\\s*([\\s\\S]*?)<\\/tasks_json>/i);
+const tasks = tasksMatch ? JSON.parse(tasksMatch[1]).tasks || [] : [];
+
+const buildStory = (index, slice) => ({
+  key: \`story-\${String(index + 1).padStart(2, '0')}\`,
+  title: slice.length > 0 ? \`AI Story \${index + 1}: \${slice[0].title}\` : \`AI Story \${index + 1}\`,
+  goal: slice.length > 0 ? \`Deliver \${slice[0].title}\` : 'Deliver the approved work',
+  summary: slice.length > 0 ? \`Implements \${slice.map((task) => task.title).join('; ')}\` : 'Implementation-ready story.',
+  task_ids: slice.map((task) => task.id),
+  in_scope: slice.map((task) => task.title),
+  out_of_scope: ['Unassigned stories'],
+  constraints: ['Stay aligned with the approved council result.'],
+  references: ['result/plan.md'],
+  developer_handoff: {
+    outcome: slice.length > 0 ? \`Complete \${slice[0].title} and satisfy linked acceptance criteria.\` : 'Complete the approved work.',
+    scope_summary: slice.map((task) => \`\${task.id}: \${task.title}\`),
+    acceptance_focus: slice.map((task) => \`Keep \${task.id} aligned with the approved slice.\`),
+    verification_focus: slice.map((task) => \`Verify \${task.id}.\`),
+    coordination_notes: []
+  },
+  ai_agent_handoff: {
+    first_step: slice[0] ? \`Start with \${slice[0].id}: \${slice[0].title}.\` : 'Start with the first task.',
+    execution_order: slice.map((task) => task.id),
+    primary_references: ['result/implementation-outline.md'],
+    completion_contract: 'Finish the tasks and verify the approved slice.'
+  }
+});
+
+let stories = [];
+if (mode === 'single' || tasks.length <= 1) {
+  stories = [buildStory(0, tasks)];
+} else {
+  const chunkSize = tasks.length >= 13 ? 4 : Math.max(1, Math.ceil(tasks.length / 2));
+  for (let index = 0; index < tasks.length; index += chunkSize) {
+    stories.push(buildStory(stories.length, tasks.slice(index, index + chunkSize)));
+  }
+}
+
+const epics = [];
+if (stories.length >= 4) {
+  const firstEpicStories = stories.slice(0, 2);
+  const secondEpicStories = stories.slice(2);
+  for (const story of firstEpicStories) story.epic_key = 'epic-01';
+  for (const story of secondEpicStories) story.epic_key = 'epic-02';
+  epics.push({ key: 'epic-01', title: 'AI Epic 1', summary: 'First delivery workstream.', story_keys: firstEpicStories.map((story) => story.key) });
+  epics.push({ key: 'epic-02', title: 'AI Epic 2', summary: 'Second delivery workstream.', story_keys: secondEpicStories.map((story) => story.key) });
+}
+
+process.stdout.write(JSON.stringify({ summary: 'AI-packaged implementation stories.', epics, stories }, null, 2));
+`.trim();
+}
+
+function configureStoryExportAgents(root, councilAgents = [
+  { id: "agent-1", provider: "test-provider", model: "model-a", label: "Story Agent A" }
+]) {
+  const scriptDir = path.join(root, ".ai-council-test");
+  fs.mkdirSync(scriptDir, { recursive: true });
+  const scriptPath = path.join(scriptDir, "story-packager.cjs");
+  fs.writeFileSync(scriptPath, storyPackagingProviderScript(), "utf8");
+
+  const providersPath = path.join(root, "config", "providers.json");
+  const providers = JSON.parse(fs.readFileSync(providersPath, "utf8"));
+  providers.default_provider = "test-provider";
+  providers.providers = {
+    "test-provider": {
+      enabled: true,
+      command: "node",
+      models: [],
+      timeout_ms: 4000,
+      session_mode: "fresh",
+      prompt_transport: "file",
+      launch_command: ["node", scriptPath, "{{PROMPT_FILE}}"]
+    }
+  };
+  fs.writeFileSync(providersPath, JSON.stringify(providers, null, 2), "utf8");
+
+  const primaryAgent = councilAgents[0];
+  saveRepoSettings(root, {
+    first_run_complete: true,
+    default_provider: "test-provider",
+    default_participant: primaryAgent,
+    auto_launch: false,
+    output_root: ".ai-council/result",
+    council_agents: councilAgents,
+    council_assignments: {
+      axiom: primaryAgent.id,
+      vector: primaryAgent.id,
+      forge: primaryAgent.id,
+      sentinel: primaryAgent.id
+    },
+    stage_assignments: {
+      proposal: councilAgents.map((agent) => agent.id),
+      critique: [primaryAgent.id],
+      refinement: [primaryAgent.id],
+      synthesis: [primaryAgent.id],
+      validation: [primaryAgent.id]
+    },
+    provider_overrides: {}
+  });
+}
+
 test("plan mode normalizes prompt input and writes meaningful result artifacts", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-plan-"));
   copyDir(path.resolve("."), root);
@@ -604,6 +717,7 @@ test("AWF export preserves existing repo config while seeding the implementation
 test("large approved results can be previewed and split into multiple structured stories", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-story-split-"));
   copyDir(path.resolve("."), root);
+  configureStoryExportAgents(root);
 
   const result = await runCouncil(root, root, {
     mode: "plan",
@@ -625,6 +739,7 @@ test("large approved results can be previewed and split into multiple structured
   assert.equal(preview.is_large_result, true);
   assert.equal(preview.can_split, true);
   assert.equal(preview.suggested_story_count >= 2, true);
+  assert.equal(preview.suggested_epic_count >= 0, true);
 
   const approved = await decideLatest(root, root, {
     decision: "approve",
@@ -632,70 +747,108 @@ test("large approved results can be previewed and split into multiple structured
   });
 
   assert.equal(approved.status, "approved");
+  assert.equal(approved.story_export.source, "ai");
   assert.equal(approved.story_export.mode, "split");
   assert.equal(approved.story_export.story_count >= 2, true);
   assert.equal(fs.existsSync(path.join(root, ".wi")), false);
 
   const manifest = JSON.parse(fs.readFileSync(path.join(result.result_path, "story-export", "split-stories", "manifest.json"), "utf8"));
+  assert.equal(manifest.source, "ai");
   assert.equal(manifest.story_count >= 2, true);
+  assert.equal(typeof manifest.generation?.prompt_file, "string");
+  assert.equal(fs.existsSync(path.join(root, manifest.generation.prompt_file)), true);
+  assert.equal(fs.existsSync(path.join(root, manifest.generation.response_file)), true);
   const firstStoryPath = path.join(root, manifest.stories[0].json_path);
   const firstStory = JSON.parse(fs.readFileSync(firstStoryPath, "utf8"));
   assert.equal(typeof firstStory.description, "string");
   assert.equal(Array.isArray(firstStory.tasks), true);
   assert.equal(Array.isArray(firstStory.acceptance_criteria), true);
   assert.equal(Array.isArray(firstStory.references), true);
+  assert.equal(firstStory.story_sequence.position, 1);
+  assert.equal(firstStory.handoff?.developer != null, true);
+  assert.equal(firstStory.handoff?.ai_agent != null, true);
+  const firstStoryMarkdown = fs.readFileSync(path.join(root, manifest.stories[0].markdown_path), "utf8");
+  assert.match(firstStoryMarkdown, /## Developer Handoff/);
+  assert.match(firstStoryMarkdown, /## AI Agent Handoff/);
+});
+
+test("split story export groups larger packages into epics and annotates inter-story dependencies", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-story-epics-"));
+  copyDir(path.resolve("."), root);
+  configureStoryExportAgents(root);
+
+  const taskLines = Array.from({ length: 13 }, (_, index) => `- Deliver slice ${index + 1}`);
+  const result = await runCouncil(root, root, {
+    mode: "plan",
+    title: "Epic-aware story export",
+    prompt: [
+      "Create a plan.",
+      ...taskLines
+    ].join("\n"),
+    clarification_answers: clarificationAnswers()
+  });
+
+  const customTasks = Array.from({ length: 13 }, (_, index) => ({
+    id: `TASK-${String(index + 1).padStart(3, "0")}`,
+    title: `Deliver slice ${index + 1}`,
+    description: `Implement delivery slice ${index + 1}.`,
+    acceptance_criteria: [`Deliver slice ${index + 1}`],
+    verification: [`Verify delivery slice ${index + 1}.`],
+    dependencies: []
+  }));
+  customTasks[4].dependencies = ["TASK-003"];
+  customTasks[8].dependencies = ["TASK-006"];
+  customTasks[12].dependencies = ["TASK-010"];
+  fs.writeFileSync(
+    path.join(result.result_path, "tasks.json"),
+    JSON.stringify({ tasks: customTasks }, null, 2),
+    "utf8"
+  );
+
+  const preview = previewLatestStoryPackaging(root, root);
+  assert.equal(preview.suggested_story_count, 4);
+  assert.equal(preview.suggested_epic_count, 2);
+
+  const approved = await decideLatest(root, root, {
+    decision: "approve",
+    story_export_mode: "split"
+  });
+
+  assert.equal(approved.status, "approved");
+  assert.equal(approved.story_export.story_count, 4);
+  assert.equal(approved.story_export.epic_count, 2);
+
+  const manifest = JSON.parse(fs.readFileSync(path.join(result.result_path, "story-export", "split-stories", "manifest.json"), "utf8"));
+  assert.equal(manifest.story_count, 4);
+  assert.equal(manifest.epic_count, 2);
+  assert.equal(manifest.epics.length, 2);
+  assert.equal(manifest.stories[0].epic_id, "EPIC-01");
+  assert.equal(manifest.stories[2].epic_id, "EPIC-02");
+  assert.deepEqual(manifest.stories[1].blocked_by, [manifest.stories[0].id]);
+  assert.deepEqual(manifest.stories[0].blocks, [manifest.stories[1].id]);
+
+  const secondStory = JSON.parse(fs.readFileSync(path.join(root, manifest.stories[1].json_path), "utf8"));
+  assert.equal(secondStory.epic.id, "EPIC-01");
+  assert.equal(secondStory.story_sequence.position, 2);
+  assert.equal(secondStory.relationships.blocked_by[0].story_id, manifest.stories[0].id);
+  assert.equal(secondStory.relationships.related_to.some((item) => item.story_id === manifest.stories[0].id), true);
+  assert.match(secondStory.title, /Deliver slice 5/);
+
+  const secondStoryMarkdown = fs.readFileSync(path.join(root, manifest.stories[1].markdown_path), "utf8");
+  assert.match(secondStoryMarkdown, /## Epic/);
+  assert.match(secondStoryMarkdown, /## Story Relationships/);
+  assert.match(secondStoryMarkdown, /### Blocked By/);
+  assert.match(secondStoryMarkdown, /## Developer Handoff/);
+  assert.match(secondStoryMarkdown, /## AI Agent Handoff/);
 });
 
 test("story export with multiple council agents requires an explicit ticket agent selection", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-story-agent-"));
   copyDir(path.resolve("."), root);
-
-  const providersPath = path.join(root, "config", "providers.json");
-  const providers = JSON.parse(fs.readFileSync(providersPath, "utf8"));
-  providers.default_provider = "test-provider";
-  providers.providers = {
-    "test-provider": {
-      enabled: true,
-      command: "node",
-      models: [],
-      timeout_ms: 2000,
-      session_mode: "fresh",
-      prompt_transport: "file",
-      launch_command: ["node", "-e", "process.stdout.write('# Response\\n')", "{{PROMPT_FILE}}"]
-    }
-  };
-  fs.writeFileSync(providersPath, JSON.stringify(providers, null, 2), "utf8");
-
-  saveRepoSettings(root, {
-    first_run_complete: true,
-    default_provider: "test-provider",
-    default_participant: {
-      id: "agent-1",
-      provider: "test-provider",
-      model: "model-a",
-      label: "Story Agent A"
-    },
-    auto_launch: false,
-    output_root: ".ai-council/result",
-    council_agents: [
-      { id: "agent-1", provider: "test-provider", model: "model-a", label: "Story Agent A" },
-      { id: "agent-2", provider: "test-provider", model: "model-b", label: "Story Agent B" }
-    ],
-    council_assignments: {
-      axiom: "agent-1",
-      vector: "agent-1",
-      forge: "agent-1",
-      sentinel: "agent-1"
-    },
-    stage_assignments: {
-      proposal: ["agent-1", "agent-2"],
-      critique: ["agent-1"],
-      refinement: ["agent-1"],
-      synthesis: ["agent-1"],
-      validation: ["agent-1"]
-    },
-    provider_overrides: {}
-  });
+  configureStoryExportAgents(root, [
+    { id: "agent-1", provider: "test-provider", model: "model-a", label: "Story Agent A" },
+    { id: "agent-2", provider: "test-provider", model: "model-b", label: "Story Agent B" }
+  ]);
 
   const result = await runCouncil(root, root, {
     mode: "plan",
@@ -745,6 +898,7 @@ test("story export with multiple council agents requires an explicit ticket agen
 test("single story approval export can package a structured story and seed AWF together", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-story-single-"));
   copyDir(path.resolve("."), root);
+  configureStoryExportAgents(root);
 
   const result = await runCouncil(root, root, {
     mode: "plan",
@@ -768,6 +922,7 @@ test("single story approval export can package a structured story and seed AWF t
   });
 
   assert.equal(approved.status, "approved");
+  assert.equal(approved.story_export.source, "ai");
   assert.equal(approved.story_export.mode, "single");
   assert.equal(fs.existsSync(path.join(result.result_path, "story-export", "single-story", "story.json")), true);
   assert.equal(fs.existsSync(path.join(result.result_path, "story-export", "single-story", "story.md")), true);
@@ -778,6 +933,12 @@ test("single story approval export can package a structured story and seed AWF t
   assert.equal(Array.isArray(storyPackage.tasks), true);
   assert.equal(Array.isArray(storyPackage.acceptance_criteria), true);
   assert.equal(Array.isArray(storyPackage.references), true);
+  assert.equal(storyPackage.handoff?.developer != null, true);
+  assert.equal(storyPackage.handoff?.ai_agent != null, true);
+  assert.equal(Array.isArray(storyPackage.in_scope), true);
+  const storyMarkdown = fs.readFileSync(path.join(result.result_path, "story-export", "single-story", "story.md"), "utf8");
+  assert.match(storyMarkdown, /## Developer Handoff/);
+  assert.match(storyMarkdown, /## AI Agent Handoff/);
 });
 
 test("design approval export carries the solution design into AWF implementation artifacts", async () => {
@@ -960,6 +1121,11 @@ test("clarifyLatest continues the council after clarification answers are suppli
     provider_overrides: {}
   });
 
+  const resultRoot = path.join(root, ".ai-council", "result");
+  const initialRunCount = fs.existsSync(resultRoot)
+    ? fs.readdirSync(resultRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length
+    : 0;
+
   const first = await runCouncil(root, root, {
     mode: "plan",
     prompt: "Add audit trail",
@@ -979,10 +1145,17 @@ test("clarifyLatest continues the council after clarification answers are suppli
   });
 
   assert.equal(clarified.status, "pending_approval");
+  assert.equal(clarified.run_id, first.run_id);
+  assert.equal(clarified.run_path, first.run_path);
+  assert.equal(clarified.work_path, first.work_path);
   assert.equal(fs.existsSync(path.join(clarified.work_path, "rounds", "01-proposal")), true);
   const clarification = JSON.parse(fs.readFileSync(path.join(clarified.work_path, "input", "clarification.json"), "utf8"));
   assert.equal(clarification.source, "answered");
   assert.equal(clarification.answered_questions.length, 1);
+  assert.equal(
+    fs.readdirSync(resultRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length,
+    initialRunCount + 1
+  );
 });
 
 test("nested repo paths resolve to the repo root for outputs and provider launch context", async () => {

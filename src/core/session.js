@@ -17,6 +17,20 @@ export function createRunWorkspace(rootPath, outputRoot, mode, title) {
   };
 }
 
+export function reuseRunWorkspace(runPath) {
+  const resolvedRunPath = path.resolve(runPath);
+  for (const relative of ["work/input", "work/repo", "work/session", "work/rounds", "work/synth", "work/logs", "result"]) {
+    ensureDir(path.join(resolvedRunPath, relative));
+  }
+
+  return {
+    runId: path.basename(resolvedRunPath),
+    runPath: resolvedRunPath,
+    workPath: path.join(resolvedRunPath, "work"),
+    resultPath: path.join(resolvedRunPath, "result")
+  };
+}
+
 export function writeTimeline(runPath, event, payload = {}) {
   appendText(
     path.join(runPath, "session", "timeline.ndjson"),

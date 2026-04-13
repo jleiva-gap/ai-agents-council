@@ -532,11 +532,19 @@ function spawnProcessAsync(executable, args, options = {}) {
     });
 
     child.on("error", (error) => {
+      const syncResult = spawnSync(invocation.executable, invocation.args, {
+        cwd: options.cwd,
+        env: options.env,
+        encoding: "utf8",
+        input: options.input,
+        timeout: options.timeout,
+        maxBuffer: options.max_capture_bytes ?? DEFAULT_MAX_CAPTURE_BYTES
+      });
       finish({
-        status: 1,
-        stdout,
-        stderr: stderr || error.message,
-        timed_out: false
+        status: syncResult.status ?? 1,
+        stdout: syncResult.stdout ?? stdout,
+        stderr: syncResult.stderr || stderr || error.message,
+        timed_out: syncResult.signal === "SIGTERM" || syncResult.error?.code === "ETIMEDOUT"
       });
     });
 

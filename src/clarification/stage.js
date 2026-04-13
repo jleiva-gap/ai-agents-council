@@ -47,6 +47,7 @@ ${wrapPromptDataBlock("canonical_ticket", ticketText)}
       "required": true,
       "observation": "what made this question necessary",
       "answer_guidance": "how the user should answer",
+      "answer_options": ["short likely answer", "another likely answer"],
       "response_format": "text | list"
     }
   ],
@@ -59,6 +60,37 @@ ${wrapPromptDataBlock("canonical_ticket", ticketText)}
   ]
 }
 `;
+}
+
+function normalizeAnswerOption(option) {
+  const value = String(option ?? "").trim();
+  return value || null;
+}
+
+function extractQuotedAnswerOptions(text) {
+  const matches = Array.from(String(text ?? "").matchAll(/(['"`])([^'"`]+?)\1/g));
+  return matches
+    .map((match) => normalizeAnswerOption(match[2]))
+    .filter(Boolean);
+}
+
+export function deriveClarificationAnswerOptions(question = {}) {
+  const directOptions = [
+    question?.answer_options,
+    question?.possible_answers,
+    question?.suggested_answers,
+    question?.options,
+    question?.choices
+  ]
+    .flatMap((entry) => Array.isArray(entry) ? entry : [])
+    .map((entry) => normalizeAnswerOption(entry))
+    .filter(Boolean);
+
+  const inferredOptions = directOptions.length > 0
+    ? []
+    : extractQuotedAnswerOptions(question?.answer_guidance ?? question?.guidance ?? "");
+
+  return Array.from(new Set([...directOptions, ...inferredOptions]));
 }
 
 function normalizeRisk(risk, index) {
@@ -81,12 +113,14 @@ function normalizeQuestion(question, index) {
   }
 
   const responseFormat = String(question?.response_format ?? question?.answer_mode ?? "").trim().toLowerCase();
+  const answerOptions = deriveClarificationAnswerOptions(question);
   return {
     id: String(question?.id ?? `CLARIFY-Q${String(index + 1).padStart(3, "0")}`).trim() || `CLARIFY-Q${String(index + 1).padStart(3, "0")}`,
     prompt,
     required: question?.required !== false,
     observation: String(question?.observation ?? "").trim() || undefined,
     answer_guidance: String(question?.answer_guidance ?? question?.guidance ?? "").trim() || undefined,
+    answer_options: answerOptions.length > 0 ? answerOptions : undefined,
     response_format: responseFormat === "list" ? "list" : "text"
   };
 }
@@ -162,6 +196,12 @@ function buildQuestionsMarkdown(result, answeredQuestions = []) {
       }
       if (question.answer_guidance) {
         lines.push(`Guidance: ${question.answer_guidance}`);
+      }
+      if ((question.answer_options ?? []).length > 0) {
+        lines.push("Possible answers:");
+        for (const [optionIndex, option] of question.answer_options.entries()) {
+          lines.push(`${optionIndex + 1}. ${option}`);
+        }
       }
       if (answeredMap.has(question.id)) {
         lines.push(`Answer: ${answeredMap.get(question.id)}`);
