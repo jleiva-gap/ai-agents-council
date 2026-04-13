@@ -1,0 +1,7 @@
+{
+  "mode": "debate",
+  "family": "creation",
+  "council": "debate-council",
+  "rounds": ["opening-positions", "challenge", "rebuttal", "convergence", "consensus"],
+  "final_outputs": ["debate-summary.md", "positions.md", "rebuttals.md", "consensus.md", "minority-concerns.md", "recommendation.md"]
+}

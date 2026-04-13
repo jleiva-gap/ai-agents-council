@@ -1,0 +1,7 @@
+{
+  "mode": "review",
+  "family": "evaluation",
+  "council": "review-council",
+  "rounds": ["ticket-understanding", "repo-evidence-review", "gap-analysis", "scoring", "synthesis"],
+  "final_outputs": ["review-summary.md", "scorecard.json", "findings.md", "comments.md", "gaps.md", "strengths.md", "acceptance-coverage.md", "recommendation.md"]
+}

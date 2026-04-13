@@ -1,0 +1,4 @@
+{
+  "name": "review-council",
+  "roles": ["reviewer", "acceptance-checker", "quality-critic", "synthesizer"]
+}
