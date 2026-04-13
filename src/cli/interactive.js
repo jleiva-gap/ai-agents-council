@@ -188,7 +188,9 @@ function renderArtifacts(status) {
     `Output root: ${status.output_root}`,
     `Mode: ${status.mode}`,
     `Family: ${status.family}`,
+    `Primary deliverable: ${status.primary_deliverable ?? "(none)"}`,
     `Final files: ${status.final_files.length > 0 ? status.final_files.join(", ") : "(none)"}`,
+    `Trace artifacts: ${status.trace_artifacts?.length > 0 ? status.trace_artifacts.join(", ") : "(none)"}`,
     `Next action: ${status.recommended_action}`
   ]);
 }
@@ -229,6 +231,7 @@ function renderHome(status, settings, repoPath) {
       `Latest run: ${status.latest_run}`,
       `Output root: ${status.output_root}`,
       `Status: ${status.status ?? "prepared"}`,
+      `Primary deliverable: ${status.primary_deliverable ?? "(none)"}`,
       `${icon("next")} Recommended: ${accent(
         status.current_stage === "awaiting_clarification"
           ? "Answer the clarification questions before proposal continues"
@@ -760,6 +763,7 @@ async function promptLatestApproval(rl, frameworkRoot, repoPath) {
     `Title: ${status.title ?? "(untitled)"}`,
     `Status: ${status.status ?? "prepared"}`,
     `Latest run: ${status.latest_run ?? "(none)"}`,
+    `Primary deliverable: ${status.primary_deliverable ?? "(none)"}`,
     `Artifacts: ${status.final_files?.length > 0 ? status.final_files.join(", ") : "(none)"}`,
     "",
     "1. Approve",

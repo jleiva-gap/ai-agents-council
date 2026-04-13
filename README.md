@@ -43,8 +43,22 @@ By default the tool is safe and artifact-first. Provider launch commands are det
 New runs now default to `.ai-council/result`, and the guided shell lets you change that output folder during configuration. You can also override it directly with `--output-root <path>`.
 Each run now separates clean deliverables from process files:
 
-- `result/` contains only the final result artifacts
-- `work/` contains prompts, logs, session files, evidence packs, and other intermediate material
+- `result/` contains only the final result artifacts, including the primary deliverable for the selected mode
+- `work/` contains prompts, logs, session files, evidence packs, and the deliberation trace under `work/synth/`
+
+Typical final deliverables include:
+
+- `result/plan.md`
+- `result/solution-design.md`
+- `result/spike.md`
+- `result/recommendation.md`
+- `result/review-summary.md`
+
+Typical trace artifacts include:
+
+- `work/synth/deliberation-trace.md`
+- `work/synth/trace-index.json`
+- `work/synth/execution-summary.md`
 
 The CLI is repo-targeted and now auto-resolves the repository root. You can run it from any folder inside a repo, and it will store configuration in that target repo's `.ai-council/` directory.
 
@@ -86,3 +100,4 @@ More docs:
 - [installation.md](C:\GAP\agents\ai-council\docs\installation.md)
 - [quickstart.md](C:\GAP\agents\ai-council\docs\quickstart.md)
 - [council-identity.md](C:\GAP\agents\ai-council\docs\council-identity.md)
+- [final-deliverable-trace-proposal.md](C:\GAP\agents\ai-council\docs\final-deliverable-trace-proposal.md)

@@ -40,17 +40,19 @@ Review runs now fail fast if the target repo cannot be indexed or the required s
 
 Each run creates:
 
-- `result/...`
-- `result/execution-summary.md`
+- `result/summary.md`
+- `result/<mode-specific deliverable>.md`
 - `work/input/ticket-definition.md`
 - `work/session/session.json`
 - `work/session/visual-reference.md`
 - `work/logs/session.log`
 - `work/rounds/.../*.prompt.md`
+- `work/synth/execution-summary.md`
+- `work/synth/deliberation-trace.md`
 
 If a provider launch fails, check:
 
-- `result/execution-summary.md`
+- `work/synth/execution-summary.md`
 - `work/logs/provider-launches.json`
 - `work/rounds/<stage>/<provider>.stderr.txt`
 - `work/session/provider-sessions.json`
@@ -64,6 +66,6 @@ When you choose `Request changes`, AI Agents Council creates a follow-up run usi
 
 - `/home` returns to the main dashboard
 - `/run` starts a new deliberation run
-- `/artifacts` shows the latest result package
+- `/artifacts` shows the latest primary deliverable, result package, and trace artifacts
 - `/configure` updates the output folder, council agents, and stage participants
 - `/cycle` shows the proposal -> critique -> refinement -> synthesis -> validation flow

@@ -234,6 +234,234 @@ function renderDebateOutput(responses) {
   ]);
 }
 
+function humanizeStageName(stageName) {
+  return String(stageName ?? "")
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function groupResponsesByStage(responses = []) {
+  const grouped = new Map();
+  for (const response of responses) {
+    if (!grouped.has(response.stage)) {
+      grouped.set(response.stage, []);
+    }
+    grouped.get(response.stage).push(response);
+  }
+  return grouped;
+}
+
+function firstAvailableStageResponses(groupedResponses, candidateStages = []) {
+  for (const stageName of candidateStages) {
+    const responses = groupedResponses.get(stageName);
+    if (Array.isArray(responses) && responses.length > 0) {
+      return responses;
+    }
+  }
+  return [];
+}
+
+function normalizeEmbeddedResponseContent(content, stageName = "") {
+  const lines = String(content ?? "")
+    .trim()
+    .split(/\r?\n/);
+
+  while (lines.length > 0 && !lines[0].trim()) {
+    lines.shift();
+  }
+
+  const firstHeading = lines[0]?.match(/^#\s+(.+)$/);
+  const normalizedStage = String(stageName ?? "").trim().toLowerCase();
+  if (firstHeading) {
+    const headingText = firstHeading[1].trim().toLowerCase();
+    if (headingText === normalizedStage || headingText === humanizeStageName(stageName).toLowerCase()) {
+      lines.shift();
+      while (lines.length > 0 && !lines[0].trim()) {
+        lines.shift();
+      }
+    }
+  }
+
+  return lines
+    .join("\n")
+    .trim()
+    .replace(/^(#{1,6})(\s+)/gm, (_, hashes, gap) => `${"#".repeat(Math.min(6, hashes.length + 1))}${gap}`);
+}
+
+function renderEmbeddedResponses(responses, options = {}) {
+  const {
+    emptyText = "No council output was captured.",
+    participantHeadingLevel = 3,
+    showParticipant = responses.length > 1,
+    showSource = false
+  } = options;
+
+  if (!Array.isArray(responses) || responses.length === 0) {
+    return [emptyText, ""];
+  }
+
+  const lines = [];
+  for (const response of responses) {
+    if (showParticipant) {
+      lines.push(`${"#".repeat(Math.max(1, Math.min(6, participantHeadingLevel)))} ${response.participant}`, "");
+    }
+    if (showSource) {
+      lines.push(`Source: \`${response.path}\``, "");
+    }
+
+    const normalized = normalizeEmbeddedResponseContent(response.content, response.stage);
+    lines.push(normalized || "_No content captured._", "");
+  }
+
+  return lines;
+}
+
+function writeDeliberationTraceArtifacts(workPath, context) {
+  const {
+    mode,
+    title,
+    workflowRounds = [],
+    responses = [],
+    primaryDeliverable = null,
+    supportingDeliverables = []
+  } = context;
+  const synthDir = path.join(workPath, "synth");
+  ensureDir(synthDir);
+
+  const grouped = groupResponsesByStage(responses);
+  const orderedStages = [];
+  for (const stageName of workflowRounds) {
+    if (!orderedStages.includes(stageName)) {
+      orderedStages.push(stageName);
+    }
+  }
+  for (const response of responses) {
+    if (!orderedStages.includes(response.stage)) {
+      orderedStages.push(response.stage);
+    }
+  }
+
+  const traceLines = [
+    "# Deliberation Trace",
+    "",
+    `Title: ${title}`,
+    `Mode: ${mode}`,
+    `Captured responses: ${responses.length}`,
+    ""
+  ];
+
+  if (primaryDeliverable || supportingDeliverables.length > 0) {
+    traceLines.push("## Final Deliverable References", "");
+    if (primaryDeliverable) {
+      traceLines.push(`- Primary deliverable: \`${primaryDeliverable}\``);
+    }
+    if (supportingDeliverables.length > 0) {
+      traceLines.push(`- Supporting deliverables: ${supportingDeliverables.map((artifact) => `\`${artifact}\``).join(", ")}`);
+    }
+    traceLines.push("");
+  }
+
+  for (const stageName of orderedStages) {
+    const stageResponses = grouped.get(stageName) ?? [];
+    traceLines.push(`## ${humanizeStageName(stageName)}`, "");
+    if (stageResponses.length === 0) {
+      traceLines.push("No response artifacts were captured for this stage.", "");
+      continue;
+    }
+
+    for (const response of stageResponses) {
+      const classification = response.response_kind ?? classifyStageResponseContent(response.content).kind;
+      traceLines.push(
+        `### ${response.participant}`,
+        "",
+        `- Classification: ${classification}`,
+        `- Source: \`${response.path}\``,
+        ""
+      );
+
+      const normalized = normalizeEmbeddedResponseContent(response.content, response.stage);
+      traceLines.push(normalized || "_No content captured._", "");
+    }
+  }
+
+  writeText(path.join(synthDir, "deliberation-trace.md"), `${traceLines.join("\n").trim()}\n`);
+  writeJson(path.join(synthDir, "trace-index.json"), {
+    generated_at: nowIso(),
+    mode,
+    title,
+    primary_deliverable: primaryDeliverable,
+    supporting_deliverables: supportingDeliverables,
+    stages: orderedStages.map((stageName) => ({
+      stage: stageName,
+      responses: (grouped.get(stageName) ?? []).map((response) => ({
+        participant: response.participant,
+        classification: response.response_kind ?? classifyStageResponseContent(response.content).kind,
+        path: response.path
+      }))
+    }))
+  });
+
+  return [
+    "work/synth/deliberation-trace.md",
+    "work/synth/trace-index.json"
+  ];
+}
+
+function writeResultSummary(resultPath, context) {
+  const {
+    title,
+    mode,
+    responseGroups,
+    primaryDeliverable = null,
+    supportingDeliverables = [],
+    traceArtifacts = [],
+    resultFiles = []
+  } = context;
+
+  const summaryLines = [
+    "# Summary",
+    "",
+    `Title: ${title}`,
+    `Mode: ${mode}`,
+    `Council outputs captured: ${responseGroups.actual.length}`,
+    `Pending provider responses: ${responseGroups.pending.length}`,
+    `Blocked provider responses: ${responseGroups.blocked.length}`,
+    "Status: pending approval",
+    ""
+  ];
+
+  if (responseGroups.actual.length === 0 && (responseGroups.pending.length > 0 || responseGroups.blocked.length > 0)) {
+    summaryLines.push(
+      "No AI consensus was captured for this run yet.",
+      responseGroups.pending.length > 0
+        ? "One or more providers were prepared but not launched, so the result package excludes placeholder responses."
+        : "One or more providers launched without producing usable Markdown output, so the result package excludes blocked responses.",
+      ""
+    );
+  }
+
+  summaryLines.push("## Deliverables", "");
+  summaryLines.push(primaryDeliverable ? `Primary deliverable: \`${primaryDeliverable}\`` : "Primary deliverable: (none)", "");
+  summaryLines.push("Supporting deliverables:");
+  if (supportingDeliverables.length > 0) {
+    summaryLines.push(...supportingDeliverables.map((artifact) => `- \`${artifact}\``));
+  } else {
+    summaryLines.push("- (none)");
+  }
+  summaryLines.push("", "Trace artifacts:");
+  if (traceArtifacts.length > 0) {
+    summaryLines.push(...traceArtifacts.map((artifact) => `- \`${artifact}\``));
+  } else {
+    summaryLines.push("- (none)");
+  }
+  summaryLines.push("", "Artifacts:", ...resultFiles.map((file) => `- ${file}`));
+
+  writeResultText(path.join(resultPath, "summary.md"), summaryLines);
+  return "summary.md";
+}
+
 function renderTaggedTicketBlock(tagName, content) {
   return wrapPromptDataBlock(tagName, content);
 }
@@ -277,35 +505,44 @@ function createModeArtifacts(mode, context) {
   const { resultPath, title, sections, acceptanceCriteria, responses, evidence, rubric } = context;
   const responseGroups = partitionStageResponses(responses);
   const consensusResponses = responseGroups.actual;
-  const files = [];
+  const responsesByStage = groupResponsesByStage(consensusResponses);
+  const resultFiles = [];
+  const supportingDeliverables = [];
   const tasks = buildTasks(acceptanceCriteria);
-  const debateLines = consensusResponses.length > 0
-    ? ["# Debate Output", "", ...renderDebateOutput(consensusResponses)]
-    : [];
+  let primaryDeliverable = null;
 
-  const summaryLines = [
-    "# Summary",
-    "",
-    `Title: ${title}`,
-    `Mode: ${mode}`,
-    `Council outputs captured: ${consensusResponses.length}`,
-    `Pending provider responses: ${responseGroups.pending.length}`,
-    `Blocked provider responses: ${responseGroups.blocked.length}`,
-    "Status: pending approval",
-    ""
-  ];
+  const addResultText = (fileName, lines, options = {}) => {
+    const { primary = false, supporting = true } = options;
+    if (!writeResultText(path.join(resultPath, fileName), lines)) {
+      return;
+    }
+    resultFiles.push(fileName);
+    if (primary) {
+      primaryDeliverable = fileName;
+      return;
+    }
+    if (supporting) {
+      supportingDeliverables.push(fileName);
+    }
+  };
 
-  if (consensusResponses.length === 0 && (responseGroups.pending.length > 0 || responseGroups.blocked.length > 0)) {
-    summaryLines.push(
-      "No AI consensus was captured for this run yet.",
-      responseGroups.pending.length > 0
-        ? "One or more providers were prepared but not launched, so the result package excludes placeholder responses."
-        : "One or more providers launched without producing usable Markdown output, so the result package excludes blocked responses.",
-      ""
-    );
-  }
+  const addResultJson = (fileName, payload, options = {}) => {
+    const { primary = false, supporting = true } = options;
+    writeJson(path.join(resultPath, fileName), payload);
+    resultFiles.push(fileName);
+    if (primary) {
+      primaryDeliverable = fileName;
+      return;
+    }
+    if (supporting) {
+      supportingDeliverables.push(fileName);
+    }
+  };
 
   if (mode === "plan") {
+    const finalDirection = firstAvailableStageResponses(responsesByStage, ["synthesis", "refinement", "proposal"]);
+    const critiqueNotes = responsesByStage.get("critique") ?? [];
+    const validationNotes = responsesByStage.get("validation") ?? [];
     const planLines = [
       "# Plan",
       "",
@@ -317,12 +554,22 @@ function createModeArtifacts(mode, context) {
     if (acceptanceCriteria.length > 0) {
       planLines.push("## Acceptance Criteria", "", ...acceptanceCriteria.map((item) => `- ${item}`), "");
     }
-    if (consensusResponses.length > 0) {
-      planLines.push("## Council Synthesis", "", ...renderDebateOutput(consensusResponses));
+    planLines.push("## Final Direction", "", ...renderEmbeddedResponses(finalDirection, {
+      emptyText: "No final direction was captured."
+    }));
+    if (critiqueNotes.length > 0) {
+      planLines.push("## Key Concerns", "", ...renderEmbeddedResponses(critiqueNotes, {
+        emptyText: "No critique notes were captured."
+      }));
+    }
+    if (validationNotes.length > 0) {
+      planLines.push("## Validation Notes", "", ...renderEmbeddedResponses(validationNotes, {
+        emptyText: "No validation notes were captured."
+      }));
     }
 
-    if (writeResultText(path.join(resultPath, "plan.md"), planLines)) files.push("plan.md");
-    if (writeResultText(path.join(resultPath, "implementation-outline.md"), [
+    addResultText("plan.md", planLines, { primary: true, supporting: false });
+    addResultText("implementation-outline.md", [
       "# Implementation Outline",
       "",
       ...tasks.flatMap((task, index) => [
@@ -331,50 +578,158 @@ function createModeArtifacts(mode, context) {
         task.description,
         ""
       ])
-    ])) files.push("implementation-outline.md");
-    writeJson(path.join(resultPath, "tasks.json"), { tasks });
-    files.push("tasks.json");
-    if (debateLines.length > 0 && writeResultText(path.join(resultPath, "debate-output.md"), debateLines)) files.push("debate-output.md");
+    ]);
+    addResultJson("tasks.json", { tasks });
   } else if (mode === "design") {
+    const finalDesign = firstAvailableStageResponses(responsesByStage, ["synthesis", "refinement", "proposal"]);
+    const critiqueNotes = responsesByStage.get("critique") ?? [];
+    const validationNotes = responsesByStage.get("validation") ?? [];
     const designLines = [
       "# Solution Design",
       "",
+      "## Objective",
+      "",
       sections.summary || sections.technical_objective || title,
-      ""
+      "",
+      "## Final Design",
+      "",
+      ...renderEmbeddedResponses(finalDesign, {
+        emptyText: "No solution design was captured."
+      })
     ];
-    if (consensusResponses.length > 0) {
-      designLines.push("## Council Synthesis", "", ...renderDebateOutput(consensusResponses));
+    if (critiqueNotes.length > 0) {
+      designLines.push("## Tradeoffs And Concerns", "", ...renderEmbeddedResponses(critiqueNotes, {
+        emptyText: "No tradeoff notes were captured."
+      }));
     }
-    if (writeResultText(path.join(resultPath, "solution-design.md"), designLines)) files.push("solution-design.md");
-    if (debateLines.length > 0 && writeResultText(path.join(resultPath, "debate-output.md"), debateLines)) files.push("debate-output.md");
+    if (validationNotes.length > 0) {
+      designLines.push("## Validation Notes", "", ...renderEmbeddedResponses(validationNotes, {
+        emptyText: "No validation notes were captured."
+      }));
+    }
+
+    addResultText("solution-design.md", designLines, { primary: true, supporting: false });
   } else if (mode === "spike") {
+    const investigationOutcome = firstAvailableStageResponses(responsesByStage, ["synthesis", "refinement", "proposal"]);
+    const critiqueNotes = responsesByStage.get("critique") ?? [];
+    const validationNotes = responsesByStage.get("validation") ?? [];
     const spikeLines = [
       "# Spike",
       "",
+      "## Objective",
+      "",
       sections.summary || sections.technical_objective || title,
-      ""
+      "",
+      "## Investigation Outcome",
+      "",
+      ...renderEmbeddedResponses(investigationOutcome, {
+        emptyText: "No investigation outcome was captured."
+      })
     ];
-    if (consensusResponses.length > 0) {
-      spikeLines.push("## Investigation Output", "", ...renderDebateOutput(consensusResponses));
+    if (critiqueNotes.length > 0) {
+      spikeLines.push("## Open Questions And Risks", "", ...renderEmbeddedResponses(critiqueNotes, {
+        emptyText: "No open questions were captured."
+      }));
     }
-    if (writeResultText(path.join(resultPath, "spike.md"), spikeLines)) files.push("spike.md");
-    if (debateLines.length > 0 && writeResultText(path.join(resultPath, "debate-output.md"), debateLines)) files.push("debate-output.md");
+    if (validationNotes.length > 0) {
+      spikeLines.push("## Validation Notes", "", ...renderEmbeddedResponses(validationNotes, {
+        emptyText: "No validation notes were captured."
+      }));
+    }
+
+    addResultText("spike.md", spikeLines, { primary: true, supporting: false });
   } else if (mode === "debate") {
-    if (debateLines.length > 0 && writeResultText(path.join(resultPath, "debate-output.md"), debateLines)) files.push("debate-output.md");
-    if (writeResultText(path.join(resultPath, "recommendation.md"), [
+    const recommendedPosition = firstAvailableStageResponses(responsesByStage, ["synthesis", "refinement", "proposal"]);
+    const concerns = responsesByStage.get("critique") ?? [];
+    const validationNotes = responsesByStage.get("validation") ?? [];
+    const recommendationLines = [
       "# Recommendation",
       "",
-      consensusResponses.length > 0
-        ? `The council debate for **${title}** is captured in \`debate-output.md\`. Review the proposal, critique, refinement, synthesis, and validation outputs before approving.`
-        : `No debate output was captured for **${title}**.`
-    ])) files.push("recommendation.md");
+      "## Question",
+      "",
+      sections.summary || sections.business_goal || title,
+      "",
+      "## Recommended Position",
+      "",
+      ...renderEmbeddedResponses(recommendedPosition, {
+        emptyText: `No debate recommendation was captured for **${title}**.`
+      })
+    ];
+    if (concerns.length > 0) {
+      recommendationLines.push("## Concerns And Tradeoffs", "", ...renderEmbeddedResponses(concerns, {
+        emptyText: "No concerns were captured."
+      }));
+    }
+    if (validationNotes.length > 0) {
+      recommendationLines.push("## Validation Notes", "", ...renderEmbeddedResponses(validationNotes, {
+        emptyText: "No validation notes were captured."
+      }));
+    }
+
+    addResultText("recommendation.md", recommendationLines, { primary: true, supporting: false });
   } else {
-    if (writeResultText(path.join(resultPath, "findings.md"), [
+    const synthesis = firstAvailableStageResponses(responsesByStage, ["synthesis", "scoring", "gap-analysis"]);
+    const ticketUnderstanding = responsesByStage.get("ticket-understanding") ?? [];
+    const evidenceReview = responsesByStage.get("repo-evidence-review") ?? [];
+    const gapAnalysis = responsesByStage.get("gap-analysis") ?? [];
+    const scoring = responsesByStage.get("scoring") ?? [];
+    const reviewSummaryLines = [
+      "# Review Summary",
+      "",
+      "## Review Target",
+      "",
+      sections.summary || sections.business_goal || title,
+      ""
+    ];
+
+    if (evidence) {
+      reviewSummaryLines.push(
+        "## Evidence Snapshot",
+        "",
+        `- Repository: ${evidence.repo_path}`,
+        `- Files indexed: ${evidence.file_count}`,
+        `- Docs found: ${evidence.doc_count}`,
+        `- Tests found: ${evidence.test_count}`,
+        ""
+      );
+    }
+
+    reviewSummaryLines.push("## Executive Summary", "", ...renderEmbeddedResponses(synthesis, {
+      emptyText: "No review summary was captured."
+    }));
+
+    if (scoring.length > 0) {
+      reviewSummaryLines.push("## Scoring Rationale", "", ...renderEmbeddedResponses(scoring, {
+        emptyText: "No scoring rationale was captured."
+      }));
+    }
+
+    addResultText("review-summary.md", reviewSummaryLines, { primary: true, supporting: false });
+    addResultText("findings.md", [
       "# Findings",
       "",
-      consensusResponses.length > 0 ? renderDebateOutput(consensusResponses).join("\n") : "No review findings were captured."
-    ])) files.push("findings.md");
-    writeJson(path.join(resultPath, "scorecard.json"), {
+      "## Ticket Understanding",
+      "",
+      ...renderEmbeddedResponses(ticketUnderstanding, {
+        emptyText: "No ticket-understanding notes were captured."
+      }),
+      "## Repository Evidence Review",
+      "",
+      ...renderEmbeddedResponses(evidenceReview, {
+        emptyText: "No repository evidence review was captured."
+      }),
+      "## Gap Analysis",
+      "",
+      ...renderEmbeddedResponses(gapAnalysis, {
+        emptyText: "No gap analysis was captured."
+      }),
+      "## Scoring",
+      "",
+      ...renderEmbeddedResponses(scoring, {
+        emptyText: "No scoring notes were captured."
+      })
+    ]);
+    addResultJson("scorecard.json", {
       rubric: rubric?.name ?? "review",
       status: "pending_approval",
       total_score: null,
@@ -389,19 +744,21 @@ function createModeArtifacts(mode, context) {
         }
         : null
     });
-    files.push("scorecard.json");
-    if (writeResultText(path.join(resultPath, "recommendation.md"), [
+    addResultText("recommendation.md", [
       "# Recommendation",
       "",
-      consensusResponses.length > 0
-        ? `Review the findings for **${title}** and decide whether to approve, request changes, or reject the implementation.`
-        : `No review recommendation was captured for **${title}**.`
-    ])) files.push("recommendation.md");
+      ...renderEmbeddedResponses(synthesis, {
+        emptyText: `No review recommendation was captured for **${title}**.`
+      })
+    ]);
   }
 
-  summaryLines.push("Artifacts:", ...files.map((file) => `- ${file}`));
-  writeResultText(path.join(resultPath, "summary.md"), summaryLines);
-  return ["summary.md", ...files].sort();
+  return {
+    primaryDeliverable,
+    supportingDeliverables,
+    resultFiles: resultFiles.sort(),
+    responseGroups
+  };
 }
 
 function compactPromptArtifactSummary(text, maxLength = 180) {
@@ -939,6 +1296,74 @@ function latestSession(rootPath, outputRoot) {
   };
 }
 
+function absoluteRunArtifactPath(latest, runRelativePath) {
+  if (typeof runRelativePath !== "string" || runRelativePath.trim().length === 0) {
+    return null;
+  }
+
+  return path.join(latest.runPath, runRelativePath.replace(/\//g, path.sep));
+}
+
+function existingRunArtifacts(latest, artifacts = []) {
+  return normalizeStringArray(artifacts)
+    .map((runRelativePath) => ({
+      runRelativePath,
+      absolutePath: absoluteRunArtifactPath(latest, runRelativePath)
+    }))
+    .filter((entry) => entry.absolutePath && pathExists(entry.absolutePath));
+}
+
+function latestPrimaryDeliverable(latest) {
+  const configured = String(latest.session.primary_deliverable ?? "").trim();
+  if (configured) {
+    return configured;
+  }
+
+  for (const candidate of [
+    "result/plan.md",
+    "result/solution-design.md",
+    "result/spike.md",
+    "result/review-summary.md",
+    "result/recommendation.md"
+  ]) {
+    if (pathExists(absoluteRunArtifactPath(latest, candidate))) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function latestSupportingDeliverables(latest) {
+  const configured = normalizeStringArray(latest.session.supporting_deliverables ?? []);
+  if (configured.length > 0) {
+    return configured.filter((artifact) => pathExists(absoluteRunArtifactPath(latest, artifact)));
+  }
+
+  const primary = latestPrimaryDeliverable(latest);
+  return [
+    "result/implementation-outline.md",
+    "result/tasks.json",
+    "result/findings.md",
+    "result/scorecard.json",
+    "result/recommendation.md",
+    "result/summary.md"
+  ].filter((artifact) => artifact !== primary && pathExists(absoluteRunArtifactPath(latest, artifact)));
+}
+
+function latestTraceArtifacts(latest) {
+  const configured = normalizeStringArray(latest.session.trace_artifacts ?? []);
+  if (configured.length > 0) {
+    return configured.filter((artifact) => pathExists(absoluteRunArtifactPath(latest, artifact)));
+  }
+
+  return [
+    "work/synth/execution-summary.md",
+    "work/synth/deliberation-trace.md",
+    "work/synth/trace-index.json"
+  ].filter((artifact) => pathExists(absoluteRunArtifactPath(latest, artifact)));
+}
+
 function availableActions(session) {
   if (session.status === "awaiting_clarification") {
     return ["answer_clarifications", "start_new_run"];
@@ -1009,6 +1434,9 @@ function buildPromptContextArtifacts(workPath, evidence = null) {
 
 function buildStatusPayload(frameworkRoot, repoPath, outputRoot, latest) {
   const finalFiles = pathExists(latest.resultPath) ? fs.readdirSync(latest.resultPath).sort() : [];
+  const primaryDeliverable = latestPrimaryDeliverable(latest);
+  const supportingDeliverables = latestSupportingDeliverables(latest);
+  const traceArtifacts = latestTraceArtifacts(latest);
   return {
     ok: true,
     framework_root: frameworkRoot,
@@ -1023,12 +1451,18 @@ function buildStatusPayload(frameworkRoot, repoPath, outputRoot, latest) {
     current_stage: latest.session.current_stage ?? null,
     status: latest.session.status ?? "prepared",
     final_files: finalFiles,
+    primary_deliverable: primaryDeliverable,
+    supporting_deliverables: supportingDeliverables,
+    trace_artifacts: traceArtifacts,
     available_actions: availableActions(latest.session),
     questions: latest.session.questions ?? latest.session.clarification?.questions ?? [],
     review: latest.session.review ?? null,
     story_export: latest.session.story_export ?? null,
     clarification: latest.session.clarification ?? null,
-    recommended_action: latest.session.next_action ?? "Review result/ first, then inspect work/ if you need the intermediate deliberation trail."
+    recommended_action: latest.session.next_action
+      ?? (primaryDeliverable
+        ? `Review ${primaryDeliverable} first, then inspect work/ if you need the intermediate deliberation trail.`
+        : "Review result/ first, then inspect work/ if you need the intermediate deliberation trail.")
   };
 }
 
@@ -1523,7 +1957,7 @@ function copyCouncilArtifactsIntoAwf(latest, repoPath, wiRoot, story, tasks) {
     ["solution-design.md", "solution-design.md"],
     ["implementation-outline.md", "implementation-outline.md"],
     ["summary.md", "ai-council-summary.md"],
-    ["debate-output.md", "ai-council-debate-output.md"],
+    ["review-summary.md", "ai-council-review-summary.md"],
     ["recommendation.md", "ai-council-recommendation.md"],
     ["findings.md", "ai-council-findings.md"],
     ["scorecard.json", "ai-council-scorecard.json"]
@@ -1648,40 +2082,28 @@ function countWords(text) {
 }
 
 function resultArtifactRefs(latest, repoPath) {
-  const refs = [];
-  const inputRefs = [
-    path.join(latest.workPath, "input", "ticket-definition.md"),
-    path.join(latest.resultPath, "summary.md"),
-    path.join(latest.resultPath, "plan.md"),
-    path.join(latest.resultPath, "solution-design.md"),
-    path.join(latest.resultPath, "implementation-outline.md"),
-    path.join(latest.resultPath, "debate-output.md"),
-    path.join(latest.resultPath, "recommendation.md"),
-    path.join(latest.resultPath, "findings.md"),
-    path.join(latest.resultPath, "scorecard.json")
+  const refs = [
+    path.join(latest.workPath, "input", "ticket-definition.md")
   ];
 
-  for (const targetPath of inputRefs) {
-    if (pathExists(targetPath)) {
-      refs.push(toRepoRelativePath(repoPath, targetPath));
-    }
+  for (const entry of existingRunArtifacts(latest, [
+    "result/summary.md",
+    latestPrimaryDeliverable(latest),
+    ...latestSupportingDeliverables(latest),
+    ...latestTraceArtifacts(latest)
+  ])) {
+    refs.push(entry.absolutePath);
   }
 
-  return normalizeStringArray(refs);
+  return normalizeStringArray(refs.map((targetPath) => toRepoRelativePath(repoPath, targetPath)));
 }
 
 function latestResultWordCount(latest) {
-  const files = [
-    path.join(latest.resultPath, "summary.md"),
-    path.join(latest.resultPath, "plan.md"),
-    path.join(latest.resultPath, "solution-design.md"),
-    path.join(latest.resultPath, "implementation-outline.md"),
-    path.join(latest.resultPath, "debate-output.md"),
-    path.join(latest.resultPath, "recommendation.md"),
-    path.join(latest.resultPath, "findings.md")
-  ];
-
-  return files.reduce((total, filePath) => total + (pathExists(filePath) ? countWords(readText(filePath)) : 0), 0);
+  return existingRunArtifacts(latest, [
+    "result/summary.md",
+    latestPrimaryDeliverable(latest),
+    ...latestSupportingDeliverables(latest)
+  ]).reduce((total, entry) => total + countWords(readText(entry.absolutePath)), 0);
 }
 
 function splitTasksIntoStoryChunks(tasks, preferredMaxTasks = STORY_SPLIT_MAX_TASKS) {
@@ -1784,9 +2206,14 @@ function buildStoryPackagingContextArtifacts(latest) {
       path: path.join(latest.resultPath, "solution-design.md")
     },
     {
-      heading: "Debate Output",
-      tag: "debate_output",
-      path: path.join(latest.resultPath, "debate-output.md")
+      heading: "Spike Artifact",
+      tag: "spike_artifact",
+      path: path.join(latest.resultPath, "spike.md")
+    },
+    {
+      heading: "Review Summary",
+      tag: "review_summary",
+      path: path.join(latest.resultPath, "review-summary.md")
     },
     {
       heading: "Recommendation",
@@ -1797,6 +2224,11 @@ function buildStoryPackagingContextArtifacts(latest) {
       heading: "Findings",
       tag: "findings",
       path: path.join(latest.resultPath, "findings.md")
+    },
+    {
+      heading: "Deliberation Trace",
+      tag: "deliberation_trace",
+      path: path.join(latest.workPath, "synth", "deliberation-trace.md")
     }
   ]
     .filter((entry) => pathExists(entry.path))
@@ -3762,7 +4194,7 @@ ${getDeliberationCycle().map((entry) => `| ${entry.stage} | ${entry.leader} | ${
   ensureDir(resultPath);
   const responses = collectStageResponses(workPath);
   const sections = parseTicketSections(normalizedInput.canonical_content);
-  const deliverables = createModeArtifacts(mode, {
+  const artifactPlan = createModeArtifacts(mode, {
     resultPath,
     title: normalizedInput.metadata.title,
     sections,
@@ -3772,20 +4204,50 @@ ${getDeliberationCycle().map((entry) => `| ${entry.stage} | ${entry.leader} | ${
     rubric: config.rubrics.review
   });
   writeExecutionSummary(workPath, executionResults, providerSessions);
-  const responseGroups = partitionStageResponses(responses);
+  const primaryDeliverable = artifactPlan.primaryDeliverable ? `result/${artifactPlan.primaryDeliverable}` : null;
+  const supportingDeliverables = artifactPlan.supportingDeliverables.map((fileName) => `result/${fileName}`);
+  const traceArtifacts = normalizeStringArray([
+    "work/synth/execution-summary.md",
+    ...writeDeliberationTraceArtifacts(workPath, {
+      mode,
+      title: normalizedInput.metadata.title,
+      workflowRounds: workflow.rounds,
+      responses: [
+        ...artifactPlan.responseGroups.actual,
+        ...artifactPlan.responseGroups.pending,
+        ...artifactPlan.responseGroups.blocked
+      ],
+      primaryDeliverable,
+      supportingDeliverables
+    })
+  ]);
+  const summaryArtifact = writeResultSummary(resultPath, {
+    title: normalizedInput.metadata.title,
+    mode,
+    responseGroups: artifactPlan.responseGroups,
+    primaryDeliverable,
+    supportingDeliverables,
+    traceArtifacts,
+    resultFiles: artifactPlan.resultFiles
+  });
+  const deliverables = [summaryArtifact, ...artifactPlan.resultFiles].sort();
+  const responseGroups = artifactPlan.responseGroups;
 
   manifest.status = "pending_approval";
   manifest.current_stage = "awaiting_approval";
   manifest.pending_actions = ["approve", "request_changes", "reject"];
   manifest.deliverables = deliverables;
+  manifest.primary_deliverable = primaryDeliverable;
+  manifest.supporting_deliverables = supportingDeliverables;
+  manifest.trace_artifacts = traceArtifacts;
   manifest.response_summary = {
     actual: responseGroups.actual.length,
     pending: responseGroups.pending.length,
     blocked: responseGroups.blocked.length
   };
   manifest.next_action = responseGroups.actual.length === 0 && responseGroups.pending.length > 0
-    ? "Providers were prepared but not launched. Enable auto-launch or rerun with launch enabled, then review result/."
-    : "Review result/ and choose approve, request changes, or reject.";
+    ? `Providers were prepared but not launched. Enable auto-launch or rerun with launch enabled, then review ${primaryDeliverable ?? "result/"} when real council output is available.`
+    : `Review ${primaryDeliverable ?? "result/"} and choose approve, request changes, or reject.`;
   writeLatestSession({
     sessionPath: path.join(workPath, "session", "session.json")
   }, manifest);
@@ -3815,6 +4277,9 @@ ${getDeliberationCycle().map((entry) => `| ${entry.stage} | ${entry.leader} | ${
       participant_models: stage.participants.map((participant) => participant.model ?? null)
     })),
     final_outputs: deliverables,
+    primary_deliverable: primaryDeliverable,
+    supporting_deliverables: supportingDeliverables,
+    trace_artifacts: traceArtifacts,
     providers,
     evidence_summary: evidence,
     available_actions: availableActions(manifest),

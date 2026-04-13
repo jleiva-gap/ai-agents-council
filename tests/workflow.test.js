@@ -186,12 +186,14 @@ test("plan mode normalizes prompt input and writes meaningful result artifacts",
   assert.equal(fs.existsSync(path.join(result.result_path, "implementation-outline.md")), true);
   assert.equal(fs.existsSync(path.join(result.result_path, "tasks.json")), true);
   assert.equal(fs.existsSync(path.join(result.result_path, "summary.md")), true);
+  assert.equal(fs.existsSync(path.join(result.result_path, "debate-output.md")), false);
   assert.equal(fs.existsSync(path.join(result.result_path, "execution-summary.md")), false);
   assert.equal(fs.existsSync(path.join(result.work_path, "input", "ticket-definition.md")), true);
   assert.equal(fs.existsSync(path.join(result.work_path, "logs", "session.log")), true);
   assert.equal(fs.existsSync(path.join(result.work_path, "session", "visual-reference.md")), true);
   assert.equal(fs.existsSync(path.join(result.work_path, "session", "deliberation-plan.json")), true);
   assert.equal(fs.existsSync(path.join(result.work_path, "synth", "execution-summary.md")), true);
+  assert.equal(fs.existsSync(path.join(result.work_path, "synth", "deliberation-trace.md")), true);
 
   const tasks = JSON.parse(fs.readFileSync(path.join(result.result_path, "tasks.json"), "utf8"));
   assert.equal(tasks.tasks.length >= 2, true);
@@ -199,6 +201,9 @@ test("plan mode normalizes prompt input and writes meaningful result artifacts",
   assert.match(logText, /\[ AXIOM \]/);
   const plan = JSON.parse(fs.readFileSync(path.join(result.work_path, "session", "deliberation-plan.json"), "utf8"));
   assert.equal(Array.isArray(plan.cycle), true);
+  const session = JSON.parse(fs.readFileSync(path.join(result.work_path, "session", "session.json"), "utf8"));
+  assert.equal(session.primary_deliverable, "result/plan.md");
+  assert.equal(session.trace_artifacts.includes("work/synth/deliberation-trace.md"), true);
   const proposalDir = path.join(result.work_path, "rounds", "01-proposal");
   const promptFile = fs.readdirSync(proposalDir).find((file) => file.endsWith(".prompt.md"));
   if (promptFile) {
@@ -634,9 +639,11 @@ test("resume exposes pending approval actions and approval can export AWF artifa
   const resumed = resumeLatest(root, root);
   assert.equal(resumed.status, "pending_approval");
   assert.deepEqual(resumed.available_actions, ["approve", "request_changes", "reject"]);
+  assert.equal(resumed.primary_deliverable, "result/plan.md");
 
   const approved = await decideLatest(root, root, {
     decision: "approve",
+    story_export_mode: "none",
     create_awf: true
   });
 
@@ -697,6 +704,7 @@ test("AWF export preserves existing repo config while seeding the implementation
 
   await decideLatest(root, root, {
     decision: "approve",
+    story_export_mode: "none",
     create_awf: true
   });
 
@@ -954,6 +962,7 @@ test("design approval export carries the solution design into AWF implementation
 
   await decideLatest(root, root, {
     decision: "approve",
+    story_export_mode: "none",
     create_awf: true
   });
 
@@ -1031,11 +1040,39 @@ test("review mode writes evidence artifacts and review package", async () => {
 
   assert.equal(result.ok, true);
   assert.equal(fs.existsSync(path.join(result.work_path, "repo", "evidence-map.json")), true);
+  assert.equal(fs.existsSync(path.join(result.result_path, "review-summary.md")), true);
   assert.equal(fs.existsSync(path.join(result.result_path, "scorecard.json")), true);
   assert.equal(fs.existsSync(path.join(result.work_path, "session", "visual-reference.json")), true);
+  const session = JSON.parse(fs.readFileSync(path.join(result.work_path, "session", "session.json"), "utf8"));
+  assert.equal(session.primary_deliverable, "result/review-summary.md");
 
   const evidence = JSON.parse(fs.readFileSync(path.join(result.work_path, "repo", "evidence-map.json"), "utf8"));
   assert.equal(evidence.test_count, 1);
+});
+
+test("debate mode writes a standalone recommendation and keeps the trace in work/synth", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-debate-"));
+  copyDir(path.resolve("."), root);
+
+  const result = await runCouncil(root, root, {
+    mode: "debate",
+    title: "Decide the artifact split",
+    prompt: "Debate whether the final answer should be separate from the deliberation trace.",
+    clarification_answers: clarificationAnswers()
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(fs.existsSync(path.join(result.result_path, "recommendation.md")), true);
+  assert.equal(fs.existsSync(path.join(result.result_path, "debate-output.md")), false);
+  assert.equal(fs.existsSync(path.join(result.work_path, "synth", "deliberation-trace.md")), true);
+
+  const recommendation = fs.readFileSync(path.join(result.result_path, "recommendation.md"), "utf8");
+  assert.match(recommendation, /## Question/);
+  assert.match(recommendation, /## Recommended Position/);
+
+  const session = JSON.parse(fs.readFileSync(path.join(result.work_path, "session", "session.json"), "utf8"));
+  assert.equal(session.primary_deliverable, "result/recommendation.md");
+  assert.equal(session.trace_artifacts.includes("work/synth/deliberation-trace.md"), true);
 });
 
 test("semantic clarification payloads preserve story-specific blocking questions", () => {
