@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { normalizeClarificationResult } from "../src/clarification/stage.js";
-import { clarifyLatest, classifyStageResponseContent, decideLatest, partitionStageResponses, previewLatestStoryPackaging, resumeLatest, runCouncil } from "../src/core/workflow.js";
+import { clarifyLatest, buildPromptText, classifyStageResponseContent, decideLatest, partitionStageResponses, previewLatestStoryPackaging, resumeLatest, runCouncil } from "../src/core/workflow.js";
 import { main } from "../src/cli/main.js";
 import { saveRepoSettings } from "../src/core/config.js";
 
@@ -96,7 +96,7 @@ const buildStory = (index, slice) => ({
 });
 
 let stories = [];
-if (mode === 'single' || tasks.length <= 1) {
+if (mode === 'single' || (mode === 'auto' && tasks.length <= 4) || tasks.length <= 1) {
   stories = [buildStory(0, tasks)];
 } else {
   const chunkSize = tasks.length >= 13 ? 4 : Math.max(1, Math.ceil(tasks.length / 2));
@@ -182,8 +182,9 @@ test("plan mode normalizes prompt input and writes meaningful result artifacts",
   assert.equal(result.ok, true);
   assert.match(result.run_path, /[\\\/]\.ai-council[\\\/]result[\\\/]/);
   assert.equal(result.status, "pending_approval");
+  assert.equal(fs.existsSync(path.join(result.result_path, "consensus.md")), true);
   assert.equal(fs.existsSync(path.join(result.result_path, "plan.md")), true);
-  assert.equal(fs.existsSync(path.join(result.result_path, "implementation-outline.md")), true);
+  assert.equal(fs.existsSync(path.join(result.result_path, "implementation-outline.md")), false);
   assert.equal(fs.existsSync(path.join(result.result_path, "tasks.json")), true);
   assert.equal(fs.existsSync(path.join(result.result_path, "summary.md")), true);
   assert.equal(fs.existsSync(path.join(result.result_path, "debate-output.md")), false);
@@ -202,7 +203,7 @@ test("plan mode normalizes prompt input and writes meaningful result artifacts",
   const plan = JSON.parse(fs.readFileSync(path.join(result.work_path, "session", "deliberation-plan.json"), "utf8"));
   assert.equal(Array.isArray(plan.cycle), true);
   const session = JSON.parse(fs.readFileSync(path.join(result.work_path, "session", "session.json"), "utf8"));
-  assert.equal(session.primary_deliverable, "result/plan.md");
+  assert.equal(session.primary_deliverable, "result/consensus.md");
   assert.equal(session.trace_artifacts.includes("work/synth/deliberation-trace.md"), true);
   const proposalDir = path.join(result.work_path, "rounds", "01-proposal");
   const promptFile = fs.readdirSync(proposalDir).find((file) => file.endsWith(".prompt.md"));
@@ -639,7 +640,7 @@ test("resume exposes pending approval actions and approval can export AWF artifa
   const resumed = resumeLatest(root, root);
   assert.equal(resumed.status, "pending_approval");
   assert.deepEqual(resumed.available_actions, ["approve", "request_changes", "reject"]);
-  assert.equal(resumed.primary_deliverable, "result/plan.md");
+  assert.equal(resumed.primary_deliverable, "result/consensus.md");
 
   const approved = await decideLatest(root, root, {
     decision: "approve",
@@ -722,7 +723,7 @@ test("AWF export preserves existing repo config while seeding the implementation
   assert.equal(runtimeTask.adapter.model, "claude-sonnet-4-5");
 });
 
-test("large approved results can be previewed and split into multiple structured stories", async () => {
+test("large approved results can be previewed and auto-packaged into multiple structured stories", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-story-split-"));
   copyDir(path.resolve("."), root);
   configureStoryExportAgents(root);
@@ -751,16 +752,18 @@ test("large approved results can be previewed and split into multiple structured
 
   const approved = await decideLatest(root, root, {
     decision: "approve",
-    story_export_mode: "split"
+    story_export_mode: "auto"
   });
 
   assert.equal(approved.status, "approved");
   assert.equal(approved.story_export.source, "ai");
+  assert.equal(approved.story_export.selection_mode, "auto");
   assert.equal(approved.story_export.mode, "split");
   assert.equal(approved.story_export.story_count >= 2, true);
   assert.equal(fs.existsSync(path.join(root, ".wi")), false);
 
-  const manifest = JSON.parse(fs.readFileSync(path.join(result.result_path, "story-export", "split-stories", "manifest.json"), "utf8"));
+  const manifest = JSON.parse(fs.readFileSync(path.join(result.result_path, "story-export", "stories", "manifest.json"), "utf8"));
+  assert.equal(manifest.selection_mode, "auto");
   assert.equal(manifest.source, "ai");
   assert.equal(manifest.story_count >= 2, true);
   assert.equal(typeof manifest.generation?.prompt_file, "string");
@@ -775,6 +778,7 @@ test("large approved results can be previewed and split into multiple structured
   assert.equal(firstStory.story_sequence.position, 1);
   assert.equal(firstStory.handoff?.developer != null, true);
   assert.equal(firstStory.handoff?.ai_agent != null, true);
+  assert.match(manifest.stories[0].folder_path, /story-export\/stories\/story-01$/);
   const firstStoryMarkdown = fs.readFileSync(path.join(root, manifest.stories[0].markdown_path), "utf8");
   assert.match(firstStoryMarkdown, /## Developer Handoff/);
   assert.match(firstStoryMarkdown, /## AI Agent Handoff/);
@@ -826,7 +830,7 @@ test("split story export groups larger packages into epics and annotates inter-s
   assert.equal(approved.story_export.story_count, 4);
   assert.equal(approved.story_export.epic_count, 2);
 
-  const manifest = JSON.parse(fs.readFileSync(path.join(result.result_path, "story-export", "split-stories", "manifest.json"), "utf8"));
+  const manifest = JSON.parse(fs.readFileSync(path.join(result.result_path, "story-export", "stories", "manifest.json"), "utf8"));
   assert.equal(manifest.story_count, 4);
   assert.equal(manifest.epic_count, 2);
   assert.equal(manifest.epics.length, 2);
@@ -834,6 +838,9 @@ test("split story export groups larger packages into epics and annotates inter-s
   assert.equal(manifest.stories[2].epic_id, "EPIC-02");
   assert.deepEqual(manifest.stories[1].blocked_by, [manifest.stories[0].id]);
   assert.deepEqual(manifest.stories[0].blocks, [manifest.stories[1].id]);
+  assert.equal(fs.existsSync(path.join(root, manifest.epics[0].readme_path)), true);
+  assert.match(manifest.stories[0].folder_path, /story-export\/stories\/epic-01\/story-01$/);
+  assert.match(manifest.stories[2].folder_path, /story-export\/stories\/epic-02\/story-03$/);
 
   const secondStory = JSON.parse(fs.readFileSync(path.join(root, manifest.stories[1].json_path), "utf8"));
   assert.equal(secondStory.epic.id, "EPIC-01");
@@ -896,7 +903,7 @@ test("story export with multiple council agents requires an explicit ticket agen
   assert.equal(approved.story_export.ticket_agent.id, "agent-2");
   assert.equal(approved.story_export.ticket_agent.label, "Story Agent B");
 
-  const manifest = JSON.parse(fs.readFileSync(path.join(result.result_path, "story-export", "split-stories", "manifest.json"), "utf8"));
+  const manifest = JSON.parse(fs.readFileSync(path.join(result.result_path, "story-export", "stories", "manifest.json"), "utf8"));
   assert.equal(manifest.ticket_agent.id, "agent-2");
   const firstStoryPath = path.join(root, manifest.stories[0].json_path);
   const firstStory = JSON.parse(fs.readFileSync(firstStoryPath, "utf8"));
@@ -931,20 +938,21 @@ test("single story approval export can package a structured story and seed AWF t
 
   assert.equal(approved.status, "approved");
   assert.equal(approved.story_export.source, "ai");
+  assert.equal(approved.story_export.selection_mode, "single");
   assert.equal(approved.story_export.mode, "single");
-  assert.equal(fs.existsSync(path.join(result.result_path, "story-export", "single-story", "story.json")), true);
-  assert.equal(fs.existsSync(path.join(result.result_path, "story-export", "single-story", "story.md")), true);
+  assert.equal(fs.existsSync(path.join(result.result_path, "story-export", "stories", "story-01", "story.json")), true);
+  assert.equal(fs.existsSync(path.join(result.result_path, "story-export", "stories", "story-01", "story.md")), true);
   assert.equal(fs.existsSync(path.join(root, ".wi", "story.json")), true);
   assert.equal(fs.existsSync(path.join(root, ".wi", "runtime", "task.json")), true);
 
-  const storyPackage = JSON.parse(fs.readFileSync(path.join(result.result_path, "story-export", "single-story", "story.json"), "utf8"));
+  const storyPackage = JSON.parse(fs.readFileSync(path.join(result.result_path, "story-export", "stories", "story-01", "story.json"), "utf8"));
   assert.equal(Array.isArray(storyPackage.tasks), true);
   assert.equal(Array.isArray(storyPackage.acceptance_criteria), true);
   assert.equal(Array.isArray(storyPackage.references), true);
   assert.equal(storyPackage.handoff?.developer != null, true);
   assert.equal(storyPackage.handoff?.ai_agent != null, true);
   assert.equal(Array.isArray(storyPackage.in_scope), true);
-  const storyMarkdown = fs.readFileSync(path.join(result.result_path, "story-export", "single-story", "story.md"), "utf8");
+  const storyMarkdown = fs.readFileSync(path.join(result.result_path, "story-export", "stories", "story-01", "story.md"), "utf8");
   assert.match(storyMarkdown, /## Developer Handoff/);
   assert.match(storyMarkdown, /## AI Agent Handoff/);
 });
@@ -979,7 +987,7 @@ test("request changes reruns the latest process and leaves the new result pendin
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-request-changes-"));
   copyDir(path.resolve("."), root);
 
-  const initial = await runCouncil(root, root, {
+  await runCouncil(root, root, {
     mode: "plan",
     title: "Refine approval loop",
     prompt: "Create a plan.\n- Update the approval loop\n- Add tests",
@@ -994,16 +1002,16 @@ test("request changes reruns the latest process and leaves the new result pendin
   assert.equal(requested.status, "pending_approval");
   assert.equal(requested.current_stage, "awaiting_approval");
   assert.deepEqual(requested.available_actions, ["approve", "request_changes", "reject"]);
-  assert.notEqual(requested.rerun.run_id, initial.run_id);
+  // consensus refine stays in the same run — no rerun object
+  assert.equal(requested.rerun, undefined);
 
   const resumed = resumeLatest(root, root);
   assert.equal(resumed.status, "pending_approval");
   assert.equal(resumed.current_stage, "awaiting_approval");
   assert.deepEqual(resumed.available_actions, ["approve", "request_changes", "reject"]);
 
-  const latestTicket = fs.readFileSync(path.join(requested.rerun.work_path, "input", "extra-context.md"), "utf8");
-  assert.match(latestTicket, /Revision Request/);
-  assert.match(latestTicket, /resuming pending approvals/i);
+  // consensus.md must still exist (and now be the refined version)
+  assert.equal(fs.existsSync(path.join(resumed.latest_run, "result", "consensus.md")), true);
 });
 
 test("custom output root is respected", async () => {
@@ -1062,6 +1070,7 @@ test("debate mode writes a standalone recommendation and keeps the trace in work
   });
 
   assert.equal(result.ok, true);
+  assert.equal(fs.existsSync(path.join(result.result_path, "consensus.md")), true);
   assert.equal(fs.existsSync(path.join(result.result_path, "recommendation.md")), true);
   assert.equal(fs.existsSync(path.join(result.result_path, "debate-output.md")), false);
   assert.equal(fs.existsSync(path.join(result.work_path, "synth", "deliberation-trace.md")), true);
@@ -1071,7 +1080,7 @@ test("debate mode writes a standalone recommendation and keeps the trace in work
   assert.match(recommendation, /## Recommended Position/);
 
   const session = JSON.parse(fs.readFileSync(path.join(result.work_path, "session", "session.json"), "utf8"));
-  assert.equal(session.primary_deliverable, "result/recommendation.md");
+  assert.equal(session.primary_deliverable, "result/consensus.md");
   assert.equal(session.trace_artifacts.includes("work/synth/deliberation-trace.md"), true);
 });
 
@@ -1640,4 +1649,136 @@ test("clear tickets skip the AI clarification round-trip before proposal starts"
 
   const promptLog = fs.readFileSync(promptLogPath, "utf8");
   assert.doesNotMatch(promptLog, /AI Agents Council Clarification Prompt/);
+});
+
+// F9 — buildPromptText unit tests
+const baseTicketContext = () => ({
+  fullText: "# Ticket\n## Summary\nDo the thing.\n## Acceptance Criteria\n- The thing is done.",
+  summaryText: "Summary: Do the thing.",
+  fullTicketPath: "input/ticket-definition.md",
+  summaryPath: "input/ticket-summary.md"
+});
+
+test("buildPromptText: proposal stage embeds full canonical ticket inline", () => {
+  const prompt = buildPromptText("plan", "proposal", "Axiom", baseTicketContext());
+  assert.match(prompt, /<canonical_ticket>/);
+  assert.match(prompt, /Do the thing\./);
+  assert.doesNotMatch(prompt, /<shared_ticket_summary>/);
+  assert.doesNotMatch(prompt, /ticket-definition\.md/);
+});
+
+test("buildPromptText: non-proposal stages use the shared ticket summary path", () => {
+  const prompt = buildPromptText("plan", "critique", "Sentinel", baseTicketContext());
+  assert.match(prompt, /<shared_ticket_summary>/);
+  assert.match(prompt, /ticket-definition\.md/);
+  assert.doesNotMatch(prompt, /<canonical_ticket>/);
+  assert.doesNotMatch(prompt, /The thing is done\./);
+});
+
+test("buildPromptText: prior artifacts block is present when stageArtifacts are provided", () => {
+  const artifacts = [
+    "rounds/01-proposal/agent.response.md",
+    "rounds/01-proposal/agent2.response.md"
+  ];
+  const prompt = buildPromptText("plan", "critique", "Sentinel", baseTicketContext(), null, artifacts);
+  assert.match(prompt, /## Prior Stage Artifacts/);
+  assert.match(prompt, /rounds\/01-proposal\/agent\.response\.md/);
+});
+
+test("buildPromptText: prior artifacts block is absent when stageArtifacts is empty", () => {
+  const prompt = buildPromptText("plan", "critique", "Sentinel", baseTicketContext(), null, []);
+  assert.doesNotMatch(prompt, /## Prior Stage Artifacts/);
+});
+
+test("buildPromptText: stage leader identity is correct for each deliberation stage", () => {
+  const ctx = baseTicketContext();
+  assert.match(buildPromptText("plan", "proposal", "Axiom", ctx), /stage leader is AXIOM/i);
+  assert.match(buildPromptText("plan", "critique", "Sentinel", ctx), /stage leader is SENTINEL/i);
+  assert.match(buildPromptText("plan", "refinement", "Forge", ctx), /stage leader is FORGE/i);
+  assert.match(buildPromptText("plan", "synthesis", "Vector", ctx), /stage leader is VECTOR/i);
+});
+
+test("buildPromptText: role guidance block is injected for proposal and critique stages", () => {
+  const ctx = baseTicketContext();
+  const proposalPrompt = buildPromptText("plan", "proposal", "Axiom", ctx);
+  assert.match(proposalPrompt, /## Role Guidance/);
+  const critiquePrompt = buildPromptText("plan", "critique", "Sentinel", ctx);
+  assert.match(critiquePrompt, /## Role Guidance/);
+  const refinementPrompt = buildPromptText("plan", "refinement", "Forge", ctx);
+  assert.match(refinementPrompt, /## Role Guidance/);
+});
+
+test("buildPromptText: mode guidance block is injected for all known modes", () => {
+  const ctx = baseTicketContext();
+  for (const mode of ["plan", "design", "spike", "debate", "review"]) {
+    const prompt = buildPromptText(mode, "proposal", "Axiom", ctx);
+    assert.match(prompt, /## Mode Guidance/, `mode guidance missing for mode "${mode}"`);
+  }
+});
+
+// F9 — createDeliberationArtifacts integration test via runCouncil
+test("deliberation trace records cross_stage_coverage for each non-proposal stage", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-trace-coverage-"));
+  copyDir(path.resolve("."), root);
+
+  const result = await runCouncil(root, root, {
+    mode: "plan",
+    title: "Coverage trace test",
+    prompt: "Add a feature with clear acceptance criteria and verification approach.",
+    clarification_answers: clarificationAnswers()
+  });
+
+  assert.equal(result.ok, true);
+  const traceIndex = JSON.parse(
+    fs.readFileSync(path.join(result.work_path, "synth", "trace-index.json"), "utf8")
+  );
+  assert.ok(Array.isArray(traceIndex.stages), "stages array missing from trace-index.json");
+
+  const proposalStage = traceIndex.stages.find((s) => s.stage === "proposal");
+  assert.ok(proposalStage, "proposal stage missing from trace");
+  assert.equal(proposalStage.cross_stage_coverage, null, "proposal should have null coverage");
+
+  const nonProposalStages = traceIndex.stages.filter((s) => s.stage !== "proposal");
+  assert.ok(nonProposalStages.length > 0, "no non-proposal stages in trace");
+  for (const stage of nonProposalStages) {
+    assert.ok(
+      stage.cross_stage_coverage !== undefined,
+      `cross_stage_coverage missing for stage ${stage.stage}`
+    );
+    assert.match(
+      String(stage.cross_stage_coverage ?? ""),
+      /^\d+\/\d+$/,
+      `cross_stage_coverage for stage ${stage.stage} should be N/M format`
+    );
+  }
+});
+
+test("deliberation trace records depth field on each response for non-proposal stages", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ai-council-trace-depth-"));
+  copyDir(path.resolve("."), root);
+
+  const result = await runCouncil(root, root, {
+    mode: "plan",
+    title: "Depth trace test",
+    prompt: "Add a feature with clear acceptance criteria and verification approach.",
+    clarification_answers: clarificationAnswers()
+  });
+
+  assert.equal(result.ok, true);
+  const traceIndex = JSON.parse(
+    fs.readFileSync(path.join(result.work_path, "synth", "trace-index.json"), "utf8")
+  );
+
+  for (const stage of traceIndex.stages) {
+    for (const response of stage.responses) {
+      if (stage.stage === "proposal") {
+        assert.equal(response.depth, null, "proposal responses should have null depth");
+      } else {
+        assert.ok(
+          response.depth === "grounded" || response.depth === "shallow" || response.depth === null,
+          `unexpected depth value "${response.depth}" in stage ${stage.stage}`
+        );
+      }
+    }
+  }
 });

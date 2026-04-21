@@ -270,7 +270,7 @@ function renderHome(status, settings, repoPath) {
           "5. Exit"
         ]
         : [
-          "1. Package approved result as a story",
+          "1. Create implementation stories from approved result",
           "2. Export approved result to AWF",
           "3. Show latest artifacts",
           "4. Start a new run",
@@ -810,21 +810,23 @@ async function promptLatestApproval(rl, frameworkRoot, repoPath) {
 
 async function promptForStoryPackaging(rl, frameworkRoot, repoPath, options = {}) {
   const packaging = previewLatestStoryPackaging(frameworkRoot, repoPath);
+  const hasStoryAgent = Array.isArray(packaging.story_agents) && packaging.story_agents.length > 0;
   const rows = [
-    packaging.is_large_result && packaging.can_split
-      ? "This result is large enough that packaging it as implementation stories may make handoff easier."
-      : "Package the approved result as an implementation story before handing it off.",
+    hasStoryAgent
+      ? packaging.can_split
+        ? "Create implementation stories. The AI story agent can keep the result as one story or split it into several meaningful stories."
+        : "Create implementation stories. The AI story agent can keep the result as a single story when that is enough for a clean handoff."
+      : "No AI story packaging agent is currently available, so you can only approve this result without generating stories.",
     `Tasks: ${packaging.task_count}`,
     `Acceptance criteria: ${packaging.acceptance_count}`,
     `Approximate result words: ${packaging.word_count}`,
-    ...(packaging.can_split ? [`Suggested split stories: ${packaging.suggested_story_count}`] : []),
-    ...(packaging.suggested_epic_count > 0 ? [`Suggested epics: ${packaging.suggested_epic_count}`] : []),
+    ...(hasStoryAgent && packaging.can_split ? [`Suggested stories: ${packaging.suggested_story_count}`] : []),
+    ...(hasStoryAgent && packaging.suggested_epic_count > 0 ? [`Suggested epic groups: ${packaging.suggested_epic_count}`] : []),
     ""
   ];
 
   const choices = [
-    { action: "single", label: "Create a single story" },
-    ...(packaging.can_split ? [{ action: "split", label: "Split into multiple stories" }] : []),
+    ...(hasStoryAgent ? [{ action: "auto", label: "Create stories" }] : []),
     ...(options.allowApproveOnly ? [{ action: "approve_only", label: "Approve only" }] : []),
     { action: "cancel", label: options.cancelLabel ?? "Cancel" }
   ];
@@ -846,8 +848,8 @@ async function promptForStoryPackaging(rl, frameworkRoot, repoPath, options = {}
   }
 
   const storyAgent = await promptForStoryAgent(rl, packaging.story_agents ?? []);
-  const createAwf = choice.action === "single"
-    ? (await promptForChoice(rl, "Generate AWF .wi folder now?", ["yes", "no"], "no")) === "yes"
+  const createAwf = choice.action === "auto"
+    ? (await promptForChoice(rl, "If packaging results in one story, generate AWF .wi folder now?", ["yes", "no"], "no")) === "yes"
     : false;
 
   return {

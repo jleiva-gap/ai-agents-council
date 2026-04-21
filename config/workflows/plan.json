@@ -2,6 +2,6 @@
   "mode": "plan",
   "family": "creation",
   "council": "default-council",
-  "rounds": ["proposal", "critique", "refinement", "synthesis", "validation"],
-  "final_outputs": ["final-plan.md", "tasks.json", "dependencies.md", "risks.md", "open-questions.md", "summary.md"]
+  "rounds": ["proposal", "critique", "refinement", "synthesis", "validation", "consensus"],
+  "final_outputs": ["consensus.md", "stories/README.md", "final-plan.md", "tasks.json", "dependencies.md", "risks.md", "open-questions.md", "summary.md"]
 }

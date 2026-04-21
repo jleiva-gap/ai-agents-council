@@ -37,12 +37,12 @@ function buildLatest(councilAgents) {
   };
 }
 
-test("defaultApprovalStoryExportMode chooses single when exactly one story export agent is available", () => {
+test("defaultApprovalStoryExportMode chooses auto when exactly one story export agent is available", () => {
   const latest = buildLatest([
     { id: "agent-1", provider: "test-provider", model: "model-a", label: "Story Agent A" }
   ]);
 
-  assert.equal(defaultApprovalStoryExportMode(latest, buildConfig()), "single");
+  assert.equal(defaultApprovalStoryExportMode(latest, buildConfig()), "auto");
 });
 
 test("defaultApprovalStoryExportMode falls back to none when story agent selection would be ambiguous", () => {

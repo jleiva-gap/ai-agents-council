@@ -330,6 +330,7 @@ export function detectProviders(providerConfig = {}, providerOverrides = {}) {
       launch_command: resolvedLaunchCommand,
       continue_command: providerOverrides?.[name]?.continue_command ?? config.continue_command ?? null,
       startup_command: providerOverrides?.[name]?.startup_command ?? config.startup_command ?? null,
+      startup_command_from_override: Boolean(providerOverrides?.[name]?.startup_command),
       timeout_ms: providerOverrides?.[name]?.timeout_ms ?? config.timeout_ms ?? 120000,
       max_capture_bytes: providerOverrides?.[name]?.max_capture_bytes ?? config.max_capture_bytes ?? DEFAULT_MAX_CAPTURE_BYTES,
       session_mode: providerOverrides?.[name]?.session_mode ?? config.session_mode ?? "fresh",
@@ -645,13 +646,23 @@ function renderCommandString(commandValue, substitutions) {
   return String(commandValue ?? "").replace(/\{\{([A-Z_]+)\}\}/g, (_, key) => substitutions[`{{${key}}}`] ?? `{{${key}}}`);
 }
 
-export async function maybeRunProviderStartup(provider, targetRepo, launch = false) {
+export async function maybeRunProviderStartup(provider, targetRepo, launch = false, trustRepoStartup = false) {
   const commandText = renderCommandString(provider.startup_command, {
     "{{TARGET_REPO}}": targetRepo
   }).trim();
 
   if (!launch || !commandText) {
     return { launched: false, command_preview: commandText };
+  }
+
+  if (provider.startup_command_from_override && !trustRepoStartup) {
+    const warning = `[ COLLECTIVE ] Startup command for "${provider.name}" sourced from repo .ai-council/settings.json was not executed. Pass --trust-startup to allow repo-level startup commands.`;
+    process.stderr.write(`${warning}\n`);
+    return {
+      launched: false,
+      command_preview: commandText,
+      skipped_reason: "startup_command sourced from repo settings — requires explicit trust"
+    };
   }
 
   const shell = process.platform === "win32"

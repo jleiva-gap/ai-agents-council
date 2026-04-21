@@ -163,7 +163,7 @@ export function resolveRepoRoot(targetPath = process.cwd()) {
   const candidate = normalizeRepoCandidate(targetPath);
 
   if (commandExists("git")) {
-    const result = spawnSync("git", ["-C", candidate, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+    const result = spawnSync("git", ["-C", candidate, "rev-parse", "--show-toplevel"], { encoding: "utf8", timeout: 3000 });
     const gitRoot = String(result.stdout ?? "").trim();
     if (result.status === 0 && gitRoot) {
       return path.resolve(gitRoot);

@@ -75,7 +75,7 @@ Common options:
   --launch              Preview or launch provider commands when configured
   --decision <name>     approve | request_changes | reject
   --create-awf          Export .wi AWF artifacts immediately after approval
-  --story-export-mode   none | single | split
+  --story-export-mode   none | auto | single | split
   --story-agent <id>    Council AI agent that should create exported stories/tickets
 `);
 }

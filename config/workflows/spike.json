@@ -2,6 +2,6 @@
   "mode": "spike",
   "family": "creation",
   "council": "spike-council",
-  "rounds": ["proposal", "critique", "refinement", "synthesis", "validation"],
-  "final_outputs": ["spike-plan.md", "unknowns.md", "hypotheses.md", "experiment-matrix.md", "recommendation.md", "summary.md"]
+  "rounds": ["proposal", "critique", "refinement", "synthesis", "validation", "consensus"],
+  "final_outputs": ["consensus.md", "spike.md", "spike-plan.md", "unknowns.md", "hypotheses.md", "experiment-matrix.md", "recommendation.md", "summary.md"]
 }

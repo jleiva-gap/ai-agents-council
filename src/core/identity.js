@@ -1,7 +1,7 @@
 const ROLE_IDENTITY_MAP = {
   planner: { id: "axiom", name: "Axiom", function: "intake" },
   architect: { id: "vector", name: "Vector", function: "plan" },
-  challenger: { id: "forge", name: "Forge", function: "implement" },
+  challenger: { id: "sentinel", name: "Sentinel", function: "review" },
   reviewer: { id: "sentinel", name: "Sentinel", function: "review" },
   synthesizer: { id: "vector", name: "Vector", function: "plan" },
   critic: { id: "sentinel", name: "Sentinel", function: "review" },
@@ -48,7 +48,9 @@ const STAGE_IDENTITY_MAP = {
   critique: { id: "sentinel", name: "Sentinel", function: "critique" },
   refinement: { id: "forge", name: "Forge", function: "refinement" },
   synthesis: { id: "vector", name: "Vector", function: "synthesis" },
-  validation: { id: "collective", name: "Collective", function: "validation" }
+  validation: { id: "collective", name: "Collective", function: "validation" },
+  consensus: { id: "vector", name: "Vector", function: "consensus" },
+  "story-breakdown": { id: "forge", name: "Forge", function: "story-breakdown" }
 };
 
 export function getStageIdentity(stageName) {
@@ -63,4 +65,17 @@ export function getDeliberationCycle() {
     { stage: "synthesis", leader: "Vector", description: "Merge perspectives into one coherent answer." },
     { stage: "validation", leader: "Collective", description: "Confirm readiness, completeness, and alignment." }
   ];
+}
+
+export function getExtraStagesForMode(mode) {
+  const CONSENSUS_STAGE = { stage: "consensus", leader: "Vector", description: "Produce the final agreed-upon consensus document." };
+  switch (mode) {
+    case "plan":
+    case "design":
+    case "debate":
+    case "spike":
+      return [CONSENSUS_STAGE];
+    default:
+      return [];
+  }
 }

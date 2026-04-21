@@ -39,6 +39,7 @@ function normalizeStageAssignments(settings) {
     }
   }
 
+  let fanOutWarningIssued = false;
   const normalizeStageValue = (values = [], stageName, fallbackProvider = null) => {
     const normalized = [];
     for (const value of Array.isArray(values) ? values : []) {
@@ -72,6 +73,12 @@ function normalizeStageAssignments(settings) {
     }
 
     if (normalized.length === 0 && councilAgents.length > 0) {
+      if (!fanOutWarningIssued) {
+        fanOutWarningIssued = true;
+        process.stderr.write(
+          `[ COLLECTIVE ] Warning: no stage assignments configured for "${stageName}" — all ${councilAgents.length} council agent(s) will be assigned to every stage (${councilAgents.length} × 5 invocations per run).\n`
+        );
+      }
       return councilAgents.map((agent) => agent.id);
     }
 

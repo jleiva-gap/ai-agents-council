@@ -2,6 +2,6 @@
   "mode": "design",
   "family": "creation",
   "council": "design-council",
-  "rounds": ["proposal", "critique", "refinement", "synthesis", "validation"],
-  "final_outputs": ["design.md", "decision-log.md", "alternatives.md", "risks.md", "assumptions.md", "open-questions.md", "summary.md"]
+  "rounds": ["proposal", "critique", "refinement", "synthesis", "validation", "consensus"],
+  "final_outputs": ["consensus.md", "stories/README.md", "solution-design.md", "decision-log.md", "alternatives.md", "risks.md", "assumptions.md", "open-questions.md", "summary.md"]
 }
