@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { startShell } from "./interactive.js";
 import { installFramework, uninstallFramework, upgradeFramework } from "../orchestrator/install_service.js";
-import { decideLatest, exportLatestToAwf, getStatus, resumeLatest, runCouncil, toolingStatus } from "../core/workflow.js";
+import { decideLatest, exportLatestToAwf, getStatus, resumeLatest, runCouncil, testSelectedModels, toolingStatus } from "../core/workflow.js";
 import { loadRepoSettings } from "../core/config.js";
 import { getBooleanOption, getOption, parseCliArgs, printHelp } from "../utils/cli.js";
 import { resolveRepoRoot } from "../utils/fs.js";
@@ -53,6 +53,11 @@ export async function main(argv) {
       case "tooling-status":
         printJson(toolingStatus(frameworkRoot, repoPath));
         return;
+      case "test-models":
+        printJson(await testSelectedModels(frameworkRoot, repoPath, {
+          settings: repoSettings
+        }));
+        return;
       case "status":
         printJson(getStatus(frameworkRoot, repoPath));
         return;
@@ -96,7 +101,8 @@ export async function main(argv) {
           "constraints-file": getOption(options, "constraints-file"),
           "acceptance-file": getOption(options, "acceptance-file"),
           "review-target-file": getOption(options, "review-target-file"),
-          "debate-topic-file": getOption(options, "debate-topic-file")
+          "debate-topic-file": getOption(options, "debate-topic-file"),
+          static_mode: getBooleanOption(options, "static")
         }));
         return;
       default:

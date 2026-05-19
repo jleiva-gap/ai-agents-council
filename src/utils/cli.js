@@ -52,6 +52,7 @@ Commands:
   uninstall-framework    Remove the shared framework install
   upgrade-framework      Reinstall the framework in-place
   tooling-status        Show detected AI CLIs and MCP readiness
+  test-models           Smoke test the currently selected council models
   status                Show the latest council run summary
   run                   Create a new council run and generate artifacts
   resume                Show the latest run and recommended next actions
@@ -73,6 +74,7 @@ Common options:
   --title <text>        Optional title override
   --provider <name>     Preferred default provider
   --launch              Preview or launch provider commands when configured
+  --static              Disable convergence loops; run exactly one deliberation pass
   --decision <name>     approve | request_changes | reject
   --create-awf          Export .wi AWF artifacts immediately after approval
   --story-export-mode   none | auto | single | split

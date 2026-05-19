@@ -3,6 +3,7 @@
   "default_mode": "plan",
   "workspace_dir": ".runs",
   "default_council": "default-council",
+  "max_convergence_loops": 2,
   "session": {
     "timeline_file": "session/timeline.ndjson"
   }

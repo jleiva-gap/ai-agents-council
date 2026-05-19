@@ -4,7 +4,7 @@ import readline from "node:readline/promises";
 import { deriveClarificationAnswerOptions } from "../clarification/stage.js";
 import { hasCompletedFirstRun, loadRepoSettings, saveRepoSettings } from "../core/config.js";
 import { getCouncilVisualReference, getDeliberationCycle } from "../core/identity.js";
-import { clarifyLatest, decideLatest, exportLatestToAwf, exportLatestToStoryPackage, getStatus, previewLatestStoryPackaging, runCouncil, toolingStatus } from "../core/workflow.js";
+import { StoryClarificationRequiredError, clarifyLatest, decideLatest, exportLatestToAwf, exportLatestToStoryPackage, getStatus, previewLatestStoryPackaging, runCouncil, testSelectedModels, toolingStatus } from "../core/workflow.js";
 import { formatPanelLines } from "./render.js";
 
 const ANSI = {
@@ -156,6 +156,7 @@ function renderHelp() {
     "/home       Show the home screen",
     "/status     Show the latest run summary",
     "/configure  Reconfigure repo output folder and stage participants",
+    "/test-models  Smoke test the selected council models",
     "/run        Start a new deliberation run",
     "/artifacts  Show latest result artifacts",
     "/cycle      Show the deliberation cycle",
@@ -172,6 +173,25 @@ function renderCycle() {
       entry.description
     ])
   ]);
+}
+
+function renderStoryClarificationRequest(err) {
+  const lines = [
+    err.summary ?? "The AI story agent identified open questions that must be resolved before stories can be created.",
+    ""
+  ];
+  for (const [i, q] of (err.questions ?? []).entries()) {
+    lines.push(`Q${i + 1}: ${q.question ?? "(no question text)"}`);
+    if (q.context) {
+      lines.push(`     Context: ${q.context}`);
+    }
+    if (Array.isArray(q.affects) && q.affects.length > 0) {
+      lines.push(`     Affects: ${q.affects.join(", ")}`);
+    }
+    lines.push("");
+  }
+  lines.push("Please answer the questions above (e.g. via a follow-up council run or by annotating the artifacts), then retry story creation.");
+  panel(`${icon("warn")} Clarification Required Before Story Creation`, lines);
 }
 
 function renderArtifacts(status) {
@@ -193,6 +213,26 @@ function renderArtifacts(status) {
     `Trace artifacts: ${status.trace_artifacts?.length > 0 ? status.trace_artifacts.join(", ") : "(none)"}`,
     `Next action: ${status.recommended_action}`
   ]);
+}
+
+function renderModelSmokeTest(summary) {
+  panel(`${icon("tools")} Model Smoke Test`, [
+    `Repository: ${summary.repo_path}`,
+    `Smoke root: ${summary.smoke_root}`,
+    `Status: ${summary.all_passed ? success("all selected models passed") : warn("one or more selected models failed")}`,
+    "",
+    ...(summary.results ?? []).map((result, index) =>
+      `${index + 1}. ${result.participant_label ?? result.provider ?? "participant"} -> ${result.provider}${result.model ? ` [${result.model}]` : ""} ${result.passed ? success("PASS") : warn("FAIL")}${result.reason ? ` - ${result.reason}` : ""}`
+    )
+  ]);
+}
+
+async function smokeTestSelectedModels(rl, frameworkRoot, repoPath, settings) {
+  clearScreen();
+  const summary = await testSelectedModels(frameworkRoot, repoPath, { settings });
+  renderModelSmokeTest(summary);
+  await waitForContinue(rl);
+  return summary;
 }
 
 function renderHome(status, settings, repoPath) {
@@ -219,10 +259,11 @@ function renderHome(status, settings, repoPath) {
       `${icon("info")} Command: ${info("ai-council run --mode plan --prompt \"Describe the work\"")}`,
       "",
       "1. Start a new run",
-      "2. Configure this repo",
-      "3. Show cycle",
-      "4. Help",
-      "5. Exit"
+      "2. Test selected models",
+      "3. Configure this repo",
+      "4. Show cycle",
+      "5. Help",
+      "6. Exit"
     ]);
   } else {
     panel(`${icon("next")} Latest Run`, [
@@ -290,7 +331,7 @@ function renderHome(status, settings, repoPath) {
   }
 
   console.log("");
-  console.log(muted("Use numbers for guided actions or slash commands for speed: /help /home /status /configure /run /artifacts /cycle /exit"));
+  console.log(muted("Use numbers for guided actions or slash commands for speed: /help /home /status /configure /run /artifacts /cycle /test-models /exit"));
 }
 
 async function promptLatestClarification(rl, frameworkRoot, repoPath) {
@@ -1166,6 +1207,9 @@ async function handleSlashCommand(command, rl, frameworkRoot, repoPath, tools, s
       renderArtifacts(getStatus(frameworkRoot, repoPath));
       await waitForContinue(rl);
       return { kind: "home", settings };
+    case "/test-models":
+      await smokeTestSelectedModels(rl, frameworkRoot, repoPath, settings);
+      return { kind: "home", settings };
     case "/configure":
       return { kind: "configured", settings: await configureWorkspace(repoPath, rl, tools, settings) };
     case "/run":
@@ -1245,22 +1289,26 @@ export async function startShell(frameworkRoot, repoPath) {
           continue;
         }
         if (response === "2") {
-          settings = await configureWorkspace(repoPath, rl, tools, settings);
+          await smokeTestSelectedModels(rl, frameworkRoot, repoPath, settings);
           continue;
         }
         if (response === "3") {
+          settings = await configureWorkspace(repoPath, rl, tools, settings);
+          continue;
+        }
+        if (response === "4") {
           clearScreen();
           renderCycle();
           await waitForContinue(rl);
           continue;
         }
-        if (response === "4") {
+        if (response === "5") {
           clearScreen();
           renderHelp();
           await waitForContinue(rl);
           continue;
         }
-        if (response === "5" || response.toLowerCase() === "exit") {
+        if (response === "6" || response.toLowerCase() === "exit") {
           return { status: "exited" };
         }
         continue;
@@ -1399,11 +1447,21 @@ export async function startShell(frameworkRoot, repoPath) {
           if (packagingChoice.cancelled) {
             continue;
           }
-          await exportLatestToStoryPackage(frameworkRoot, repoPath, {
-            story_export_mode: packagingChoice.mode,
-            story_agent: packagingChoice.storyAgent,
-            create_awf: packagingChoice.createAwf
-          });
+          try {
+            await exportLatestToStoryPackage(frameworkRoot, repoPath, {
+              story_export_mode: packagingChoice.mode,
+              story_agent: packagingChoice.storyAgent,
+              create_awf: packagingChoice.createAwf
+            });
+          } catch (err) {
+            if (err instanceof StoryClarificationRequiredError) {
+              clearScreen();
+              renderStoryClarificationRequest(err);
+              await waitForContinue(rl);
+            } else {
+              throw err;
+            }
+          }
           continue;
         }
         if (response === "2") {

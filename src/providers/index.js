@@ -26,8 +26,8 @@ const PROVIDER_PROFILES = {
   gemini: {
     help_args: ["--help"],
     required_help_tokens: ["-p, --prompt", "--approval-mode", "--include-directories", "-m, --model"],
-    required_launch_tokens: [["-p", "--prompt"], ["--approval-mode"]],
-    compatibility_note: "Expected Gemini CLI headless prompt flags (-p/--prompt, --approval-mode, --include-directories, --model).",
+    required_launch_tokens: [["--approval-mode"], ["--include-directories"]],
+    compatibility_note: "Expected Gemini CLI non-interactive flags (--approval-mode, --include-directories, --model) with positional or flagged prompt support.",
     prompt_modes: ["stdin", "arg"]
   },
   copilot: {
@@ -186,14 +186,41 @@ function mergeModelCatalogs(discoveredModels = [], fallbackModels = []) {
 }
 
 function discoverProviderModels(providerName, helpText = "", fallbackModels = []) {
+  const lines = String(helpText ?? "").split(/\r?\n/);
+
   if (providerName === "claude") {
-    const modelLine = String(helpText ?? "")
-      .split(/\r?\n/)
-      .find((line) => line.includes("--model <model>"));
+    const modelLine = lines.find((line) => line.includes("--model <model>"));
     const discovered = Array.from(String(modelLine ?? "").matchAll(/'([^']+)'/g))
       .map((match) => match[1])
       .filter((value) => /^(sonnet|opus|claude-)/i.test(value));
     return mergeModelCatalogs(discovered, fallbackModels);
+  }
+
+  if (providerName === "gemini") {
+    // Gemini CLI currently lists no model names in --help text, but if a future
+    // version adds them (e.g. as [choices: "gemini-2.5-pro", ...]) this will
+    // pick them up automatically.
+    const modelLine = lines.find((line) => /--model/.test(line));
+    const discovered = Array.from(String(modelLine ?? "").matchAll(/"(gemini-[\w.-]+)"/g))
+      .map((match) => match[1])
+      .filter((value) => /^gemini-\d/i.test(value));
+    return mergeModelCatalogs(discovered, fallbackModels);
+  }
+
+  if (providerName === "codex") {
+    // Codex is a native Rust binary; its --help output lists no model names.
+    // If a future version adds them (e.g. [possible values: gpt-5.4, ...])
+    // this will pick them up automatically.
+    const discovered = Array.from(String(helpText ?? "").matchAll(/\b(gpt-[\w.-]+|o\d[\w.-]*)\b/g))
+      .map((match) => match[1])
+      .filter((value) => /^(gpt-\d|o\d)/i.test(value));
+    return mergeModelCatalogs(discovered, fallbackModels);
+  }
+
+  if (providerName === "copilot") {
+    // Copilot CLI lists no model names in --help; copilot's model catalog
+    // is only discoverable from its internal bundle, not its help text.
+    return mergeModelCatalogs([], fallbackModels);
   }
 
   return mergeModelCatalogs([], fallbackModels);

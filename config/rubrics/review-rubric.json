@@ -1,14 +1,20 @@
 {
   "name": "default-review-rubric",
   "categories": [
-    { "id": "goal_alignment", "weight": 20 },
-    { "id": "acceptance_criteria", "weight": 20 },
-    { "id": "technical_correctness", "weight": 15 },
-    { "id": "design_quality", "weight": 10 },
-    { "id": "maintainability", "weight": 10 },
-    { "id": "testability", "weight": 10 },
-    { "id": "completeness", "weight": 10 },
-    { "id": "risk_handling", "weight": 5 }
+    { "id": "criteria_pass_rate", "label": "Acceptance Criteria Pass Rate", "weight": 25, "description": "Fraction of acceptance criteria that PASS with concrete evidence. All must pass for Ready status." },
+    { "id": "specification_conformance", "label": "Technical Specification Conformance", "weight": 20, "description": "Files exist at stated paths, interfaces match signatures, data shapes match schemas, technology constraints honored." },
+    { "id": "test_coverage", "label": "Test Requirements Coverage", "weight": 20, "description": "All named test cases exist, contain the described assertion, and pass." },
+    { "id": "scope_discipline", "label": "Out of Scope Discipline", "weight": 10, "description": "Implementation contains nothing listed in Out of Scope. No scope creep introduced." },
+    { "id": "edge_case_handling", "label": "Edge Case and Error Handling", "weight": 10, "description": "Every edge case and error mode named in Agent Notes is handled as specified." },
+    { "id": "security_requirements", "label": "Security Requirements", "weight": 10, "description": "All security constraints named in Agent Notes are implemented and verifiable." },
+    { "id": "goal_alignment", "label": "Goal Alignment", "weight": 5, "description": "The deliverable matches the Description field — produces the named artifact solving the stated problem." }
   ],
-  "blocking_threshold": 60
+  "blocking_threshold": 60,
+  "auto_fail_conditions": [
+    "Any acceptance criterion is FAIL",
+    "Any file listed in 'Files to create' does not exist",
+    "Any file listed in 'Files that must NOT be touched' was modified",
+    "Any named test case is missing or fails",
+    "Any feature listed in Out of Scope is present in the implementation"
+  ]
 }

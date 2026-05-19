@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { normalizeClarificationResult } from "../src/clarification/stage.js";
-import { clarifyLatest, buildPromptText, classifyStageResponseContent, decideLatest, partitionStageResponses, previewLatestStoryPackaging, resumeLatest, runCouncil } from "../src/core/workflow.js";
+import { clarifyLatest, buildPromptText, classifyStageResponseContent, decideLatest, partitionStageResponses, previewLatestStoryPackaging, resolveModelSmokeTestTargets, resumeLatest, runCouncil } from "../src/core/workflow.js";
 import { main } from "../src/cli/main.js";
 import { saveRepoSettings } from "../src/core/config.js";
 
@@ -1649,6 +1649,36 @@ test("clear tickets skip the AI clarification round-trip before proposal starts"
 
   const promptLog = fs.readFileSync(promptLogPath, "utf8");
   assert.doesNotMatch(promptLog, /AI Agents Council Clarification Prompt/);
+});
+
+test("model smoke test targets resolve the selected council agents and default participant fallback", () => {
+  const providerStatus = [
+    { name: "copilot", enabled: true, available: true, launch_command: [] },
+    { name: "gemini", enabled: true, available: true, launch_command: [] }
+  ];
+
+  const selected = resolveModelSmokeTestTargets(providerStatus, {
+    default_provider: "copilot",
+    council_agents: [
+      { id: "agent-1", provider: "copilot", model: "gpt-5.4", label: "Copilot Primary" },
+      { id: "agent-2", provider: "gemini", model: "gemini-2.5-pro", label: "Gemini Challenger" }
+    ]
+  });
+
+  assert.equal(selected.length, 2);
+  assert.deepEqual(selected.map((agent) => [agent.agent_id, agent.provider, agent.model]), [
+    ["agent-1", "copilot", "gpt-5.4"],
+    ["agent-2", "gemini", "gemini-2.5-pro"]
+  ]);
+
+  const fallback = resolveModelSmokeTestTargets(providerStatus, {
+    default_provider: "copilot",
+    default_participant: { id: "agent-9", provider: "copilot", model: "gpt-5.3-codex", label: "Fallback" }
+  });
+
+  assert.equal(fallback.length, 1);
+  assert.deepEqual(fallback[0].agent_id, "agent-9");
+  assert.equal(fallback[0].model, "gpt-5.3-codex");
 });
 
 // F9 — buildPromptText unit tests

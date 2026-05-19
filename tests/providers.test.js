@@ -38,6 +38,7 @@ Usage: codex exec [OPTIONS] [PROMPT] [COMMAND]
   -C, --cd <DIR>  Tell the agent to use the specified directory as its working root
   --skip-git-repo-check  Allow running Codex outside a Git repository
   --add-dir <DIR>  Additional directories that should be writable alongside the primary workspace
+  --model <MODEL>  Supported models: gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5-mini
 `;
 
   const result = analyzeProviderHelp(
@@ -50,8 +51,9 @@ Usage: codex exec [OPTIONS] [PROMPT] [COMMAND]
 
   assert.equal(result.compatible, true);
   assert.equal(result.launch_command_valid, true);
-  assert.equal(result.model_source, "config");
-  assert.deepEqual(result.models, ["gpt-5.4", "gpt-5.4-mini"]);
+  assert.equal(result.model_source, "cli+config");
+  assert.deepEqual(result.cli_discovered_models, ["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5-mini"]);
+  assert.deepEqual(result.models, ["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5-mini"]);
 });
 
 test("copilot analysis flags non-interactive launch commands that omit required approval flags", () => {
@@ -68,13 +70,41 @@ Usage: copilot [options] [command]
     "copilot",
     helpText,
     ["copilot", "-p", "{{PROMPT_TEXT}}", "--add-dir", "{{ARTIFACT_DIRECTORY}}"],
-    ["gpt-5.2"],
+    [
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.3-codex",
+      "gpt-5.2-codex",
+      "gpt-5.2",
+      "gpt-5.1-codex-max",
+      "gpt-5.1-codex",
+      "gpt-5.1",
+      "gpt-5.1-codex-mini",
+      "gpt-5-mini",
+      "gpt-4.1",
+      "claude-sonnet-4.6",
+      "claude-opus-4.6",
+      "claude-opus-4.6-fast",
+      "claude-opus-4.6-1m",
+      "claude-sonnet-4.5",
+      "claude-opus-4.5",
+      "claude-haiku-4.5",
+      "claude-sonnet-4",
+      "gpt-5",
+      "claude-sonnet-4-5",
+      "claude-opus-4",
+      "claude-opus-4-1"
+    ],
     "arg"
   );
 
   assert.equal(result.compatible, true);
   assert.equal(result.launch_command_valid, false);
   assert.match(result.launch_command_note ?? "", /allow-all-tools/i);
+  assert.match(result.models.join(","), /claude-sonnet-4\.6/);
+  assert.match(result.models.join(","), /claude-opus-4\.6/);
+  assert.match(result.models.join(","), /gpt-5\.4/);
+  assert.match(result.models.join(","), /gpt-5-mini/);
 });
 
 test("gemini analysis rejects arg transport when the prompt placeholder is missing", () => {
@@ -97,6 +127,28 @@ Usage: gemini [options] [command]
   assert.equal(result.compatible, true);
   assert.equal(result.launch_command_valid, false);
   assert.match(result.launch_command_note ?? "", /prompt transport/i);
+});
+
+test("gemini analysis accepts positional prompt launch commands for arg transport", () => {
+  const helpText = `
+Usage: gemini [options] [command]
+  -m, --model  Model
+  -p, --prompt  Run in non-interactive (headless) mode with the given prompt
+  --approval-mode  Set the approval mode
+  --include-directories  Additional directories to include in the workspace
+`;
+
+  const result = analyzeProviderHelp(
+    "gemini",
+    helpText,
+    ["gemini", "{{PROMPT_TEXT}}", "--approval-mode", "auto_edit", "--include-directories", "{{ARTIFACT_DIRECTORY}}"],
+    ["gemini-2.5-pro"],
+    "arg"
+  );
+
+  assert.equal(result.compatible, true);
+  assert.equal(result.launch_command_valid, true);
+  assert.equal(result.launch_command_note, null);
 });
 
 test("resolveProcessInvocation uses a Windows-safe wrapper for explicit PowerShell scripts", () => {
